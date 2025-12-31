@@ -1,0 +1,200 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE scenario SYSTEM "sipp.dtd">
+
+<scenario name="Agent REGISTER then answer calls (same instance/port)">
+
+    <!--
+      agent.csv 欄位建議：
+        field0 = extension / agent number (例如 1001)
+        field1 = password
+        field2 = domain (例如 pbx.example.com 或 10.0.0.10)
+        field3 = realm (可選；不知道就先跟 domain 一樣或留空)
+
+      啟動時請加：
+        -inf agent.csv
+        -i <agent_listen_ip> -p <agent_listen_port>
+        以及 target 寫 registrar：  sipp <PBX_IP:5060> -sf agent_register_and_answer.xml ...
+    -->
+
+    <!-- ========= REGISTER (initial) ========= -->
+
+    <send retrans="500">
+        <![CDATA[
+REGISTER sip:[field2] SIP/2.0
+Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]
+Max-Forwards: 70
+From: <sip:[field0]@[field2]>;tag=[call_number]
+To: <sip:[field0]@[field2]>
+Call-ID: [call_id]
+CSeq: 1 REGISTER
+Contact: <sip:[field0]@[local_ip]:[local_port];transport=[transport]>
+Expires: 300
+Content-Length: 0
+]]>
+    </send>
+
+    <!-- 有些會先 100 Trying -->
+    <recv response="100" optional="true"/>
+
+    <!-- 401 Digest challenge：收到就走認證重送 REGISTER -->
+    <recv response="401" auth="true" optional="true"/>
+
+    <send retrans="500" optional="true">
+        <![CDATA[
+REGISTER sip:[field2] SIP/2.0
+Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]
+Max-Forwards: 70
+From: <sip:[field0]@[field2]>;tag=[call_number]
+To: <sip:[field0]@[field2]>
+Call-ID: [call_id]
+CSeq: 2 REGISTER
+Contact: <sip:[field0]@[local_ip]:[local_port];transport=[transport]>
+Expires: 300
+[authentication username=[field0] password=[field1]]
+Content-Length: 0
+]]>
+    </send>
+
+    <!-- REGISTER 成功 -->
+    <recv response="200" crlf="true"/>
+
+    <!-- ========= 主迴圈：等 INVITE 進來 ========= -->
+    <label id="WAIT_CALL"/>
+
+    <!-- 交換機會依 Contact 打到你 -i/-p 的位址，所以這裡直接等 INVITE -->
+    <recv request="INVITE" crlf="true"/>
+
+    <!-- 100 Trying -->
+    <send>
+        <![CDATA[
+SIP/2.0 100 Trying
+[last_Via:]
+[last_From:]
+[last_To:]
+[last_Call-ID:]
+[last_CSeq:]
+Content-Length: 0
+]]>
+    </send>
+
+    <!-- 180 Ringing -->
+    <send>
+        <![CDATA[
+SIP/2.0 180 Ringing
+[last_Via:]
+[last_From:]
+[last_To:];tag=[call_number]
+[last_Call-ID:]
+[last_CSeq:]
+Contact: <sip:[field0]@[local_ip]:[local_port];transport=[transport]>
+Content-Length: 0
+]]>
+    </send>
+
+    <!-- 200 OK (answer) + SDP -->
+    <send>
+        <![CDATA[
+SIP/2.0 200 OK
+[last_Via:]
+[last_From:]
+[last_To:];tag=[call_number]
+[last_Call-ID:]
+[last_CSeq:]
+Contact: <sip:[field0]@[local_ip]:[local_port];transport=[transport]>
+Supported: timer
+Session-Expires: 1800
+Content-Type: application/sdp
+Content-Length: [len]
+
+v=0
+o=agent 1 1 IN IP4 [local_ip]
+s=-
+c=IN IP4 [local_ip]
+t=0 0
+m=audio [media_port] RTP/AVP 8 101
+a=rtpmap:8 PCMA/8000
+a=rtpmap:101 telephone-event/8000
+a=fmtp:101 0-16
+a=sendrecv
+]]>
+    </send>
+
+    <!-- 等 ACK -->
+    <recv request="ACK" crlf="true"/>
+
+    <!-- ===== 通話期間：吸收 heartbeat / 控制訊息，避免 unexpected ===== -->
+
+    <!-- out-of-dialog OPTIONS heartbeat -->
+    <recv request="OPTIONS" optional="true"/>
+    <send optional="true">
+        <![CDATA[
+SIP/2.0 200 OK
+[last_Via:]
+[last_From:]
+[last_To:];tag=[call_number]
+[last_Call-ID:]
+[last_CSeq:]
+Content-Length: 0
+]]>
+    </send>
+
+    <!-- INFO（例如 MSML） -->
+    <recv request="INFO" optional="true"/>
+    <send optional="true">
+        <![CDATA[
+SIP/2.0 200 OK
+[last_Via:]
+[last_From:]
+[last_To:]
+[last_Call-ID:]
+[last_CSeq:]
+Content-Length: 0
+]]>
+    </send>
+
+    <!-- Session refresh：re-INVITE / UPDATE -->
+    <recv request="INVITE" optional="true"/>
+    <send optional="true">
+        <![CDATA[
+SIP/2.0 200 OK
+[last_Via:]
+[last_From:]
+[last_To:];tag=[call_number]
+[last_Call-ID:]
+[last_CSeq:]
+Content-Length: 0
+]]>
+    </send>
+    <recv request="ACK" optional="true"/>
+
+    <recv request="UPDATE" optional="true"/>
+    <send optional="true">
+        <![CDATA[
+SIP/2.0 200 OK
+[last_Via:]
+[last_From:]
+[last_To:]
+[last_Call-ID:]
+[last_CSeq:]
+Content-Length: 0
+]]>
+    </send>
+
+    <!-- 等對方掛斷 -->
+    <recv request="BYE" crlf="true"/>
+    <send>
+        <![CDATA[
+SIP/2.0 200 OK
+[last_Via:]
+[last_From:]
+[last_To:]
+[last_Call-ID:]
+[last_CSeq:]
+Content-Length: 0
+]]>
+    </send>
+
+    <!-- 回到等待下一通 -->
+    <goto id="WAIT_CALL"/>
+
+</scenario>
