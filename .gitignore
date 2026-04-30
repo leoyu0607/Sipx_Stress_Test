@@ -30,3 +30,14 @@ go.work.sum
 # Editor/IDE
 # .idea/
 # .vscode/
+
+
+# Added by cargo
+
+target/
+.vscode/
+node_modules/
+cli/target/
+gui/node_modules/
+core/target/
+gui/src-tauri/target/

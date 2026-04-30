@@ -1,0 +1,143 @@
+mod args;
+mod tui;
+
+use anyhow::Result;
+use args::Args;
+use clap::Parser;
+use sipress_core::{
+    config::Config,
+    engine::{Engine, ProgressCallback},
+    html_reporter::HtmlReporter,
+    reporter::{OutputFormat, Reporter},
+    sip_logger::SipLogger,
+    stats::StatsSnapshot,
+};
+use std::{
+    str::FromStr,
+    sync::{Arc, Mutex},
+};
+use tui::dashboard::{run_tui, TuiState};
+use tokio::sync::mpsc;
+use tracing_subscriber::EnvFilter;
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let args = Args::parse();
+
+    // 初始化 log（RUST_LOG 環境變數優先，否則預設 warn）
+    let filter = if args.verbose { "debug" } else { "warn" };
+    tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| filter.into()))
+        .init();
+
+    // 建構設定
+    let config = Config {
+        server_addr:          args.server.clone(),
+        local_addr:           args.local_addr.clone(),
+        local_domain:         args.local_domain.clone(),
+        caller_number:        args.caller.clone(),
+        callee_prefix:        args.callee_prefix.clone(),
+        callee_range:         args.callee_range,
+        cps:                  args.cps,
+        max_concurrent_calls: args.max_concurrent,
+        duration_secs:        args.duration,
+        call_duration_secs:   args.call_duration,
+        invite_timeout_secs:  args.invite_timeout,
+        logs_dir:             args.logs_dir.clone(),
+        rtp_base_port:        args.rtp_base_port,
+        audio_file:           args.audio_file.clone(),
+        enable_rtp:           args.enable_rtp,
+        ..Default::default()
+    };
+
+    let engine = Engine::new(config.clone());
+
+    // ── TUI 模式 ──────────────────────────────────────────────────
+    if args.tui {
+        let tui_state = Arc::new(Mutex::new(TuiState {
+            target_cps:      args.cps,
+            target_duration: args.duration,
+            ..Default::default()
+        }));
+        let tui_state_cb = Arc::clone(&tui_state);
+
+        let (done_tx, done_rx) = mpsc::channel::<()>(1);
+
+        // on_progress callback → 更新 TUI state
+        let on_progress: ProgressCallback = Arc::new(move |snap: StatsSnapshot, progress: f64| {
+            let mut st = tui_state_cb.lock().unwrap();
+            st.snapshot     = snap;
+            st.progress     = progress;
+            st.elapsed_secs = progress * tui_state_cb.lock().unwrap().target_duration as f64;
+        });
+
+        // 啟動引擎
+        let engine_handle = {
+            let on_progress = Some(on_progress);
+            tokio::spawn(async move {
+                engine.run(on_progress).await
+            })
+        };
+
+        // 啟動 TUI（阻塞直到 q 或結束）
+        run_tui(Arc::clone(&tui_state), done_rx).await?;
+
+        // 等待引擎完成
+        let report = engine_handle.await??;
+        let _ = done_tx.send(()).await;
+
+        // TUI 退出後仍然印出最終報告
+        let fmt = OutputFormat::from_str(&args.format).unwrap_or(OutputFormat::Table);
+        Reporter::print(&report, fmt);
+
+        if args.html {
+            let ts = report_timestamp();
+            match HtmlReporter::save(&report, &args.report_dir, &ts) {
+                Ok(path) => eprintln!("[sipress] HTML 報告 → {}", path.display()),
+                Err(e)   => eprintln!("[sipress] HTML 報告失敗：{}", e),
+            }
+        }
+
+    // ── 無頭模式 ─────────────────────────────────────────────────
+    } else {
+        let on_progress: Option<ProgressCallback> = if args.verbose {
+            Some(Arc::new(|snap: StatsSnapshot, progress: f64| {
+                eprintln!(
+                    "[{:.0}%] 發起={} 接通={} 失敗={} ASR={:.1}%",
+                    progress * 100.0,
+                    snap.calls_initiated,
+                    snap.calls_answered,
+                    snap.calls_failed,
+                    snap.asr,
+                );
+            }))
+        } else {
+            None
+        };
+
+        let report = engine.run(on_progress).await?;
+        let fmt = OutputFormat::from_str(&args.format).unwrap_or(OutputFormat::Table);
+        Reporter::print(&report, fmt);
+
+        if args.html {
+            let ts = report_timestamp();
+            match HtmlReporter::save(&report, &args.report_dir, &ts) {
+                Ok(path) => eprintln!("[sipress] HTML 報告 → {}", path.display()),
+                Err(e)   => eprintln!("[sipress] HTML 報告失敗：{}", e),
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// 取得當前時間字串（用於報告檔名）
+fn report_timestamp() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    // 複用 SipLogger 的時間格式
+    sipress_core::sip_logger::SipLogger::timestamp_for_filename(secs)
+}

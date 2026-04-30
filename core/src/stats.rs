@@ -1,0 +1,206 @@
+/// 指標收集：ASR / ACD / PDD / 延遲直方圖
+use hdrhistogram::Histogram;
+use serde::{Deserialize, Serialize};
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Mutex,
+};
+
+// ─── 即時原子計數器 ─────────────────────────────────────────────
+
+/// 執行期間持續更新的輕量計數（原子操作，無鎖）
+#[derive(Default)]
+pub struct LiveStats {
+    pub calls_initiated: AtomicU64,
+    pub calls_answered:  AtomicU64,
+    pub calls_completed: AtomicU64,
+    pub calls_failed:    AtomicU64,
+    pub calls_timeout:   AtomicU64,
+}
+
+impl LiveStats {
+    pub fn on_invite(&self) {
+        self.calls_initiated.fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn on_answered(&self) {
+        self.calls_answered.fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn on_completed(&self) {
+        self.calls_completed.fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn on_failed(&self) {
+        self.calls_failed.fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn on_timeout(&self) {
+        self.calls_timeout.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// 快照（用於進度回報 / TUI 更新）
+    pub fn snapshot(&self) -> StatsSnapshot {
+        let initiated  = self.calls_initiated.load(Ordering::Relaxed);
+        let answered   = self.calls_answered.load(Ordering::Relaxed);
+        let completed  = self.calls_completed.load(Ordering::Relaxed);
+        let failed     = self.calls_failed.load(Ordering::Relaxed);
+        let timeout    = self.calls_timeout.load(Ordering::Relaxed);
+
+        let asr = if initiated > 0 {
+            answered as f64 / initiated as f64 * 100.0
+        } else {
+            0.0
+        };
+
+        StatsSnapshot {
+            calls_initiated: initiated,
+            calls_answered:  answered,
+            calls_completed: completed,
+            calls_failed:    failed,
+            calls_timeout:   timeout,
+            asr,
+        }
+    }
+}
+
+// ─── 快照（可序列化，用於 JSON / TUI） ──────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct StatsSnapshot {
+    pub calls_initiated: u64,
+    pub calls_answered:  u64,
+    pub calls_completed: u64,
+    pub calls_failed:    u64,
+    pub calls_timeout:   u64,
+    /// Answer Seizure Ratio（%）
+    pub asr: f64,
+}
+
+// ─── 詳細統計（直方圖，需要 Mutex） ────────────────────────────
+
+/// 精確時延統計，用 HDR Histogram（解析度 1µs，最大 60s）
+pub struct DetailedStats {
+    /// PDD 分佈（µs）
+    pub pdd_hist: Mutex<Histogram<u64>>,
+    /// 通話建立時間分佈（µs）
+    pub setup_hist: Mutex<Histogram<u64>>,
+    /// 通話持續時間分佈（µs）
+    pub dur_hist: Mutex<Histogram<u64>>,
+
+    // 錯誤碼分類
+    pub fail_4xx: AtomicU64,
+    pub fail_5xx: AtomicU64,
+    pub fail_6xx: AtomicU64,
+}
+
+impl Default for DetailedStats {
+    fn default() -> Self {
+        // 最大 60 秒，精度 3 位有效數字
+        let make = || Histogram::<u64>::new_with_bounds(1, 60_000_000, 3).unwrap();
+        Self {
+            pdd_hist:   Mutex::new(make()),
+            setup_hist: Mutex::new(make()),
+            dur_hist:   Mutex::new(make()),
+            fail_4xx:   AtomicU64::new(0),
+            fail_5xx:   AtomicU64::new(0),
+            fail_6xx:   AtomicU64::new(0),
+        }
+    }
+}
+
+impl DetailedStats {
+    /// 記錄 PDD（ms → µs）
+    pub fn record_pdd(&self, ms: f64) {
+        let us = (ms * 1000.0) as u64;
+        if let Ok(mut h) = self.pdd_hist.lock() {
+            let _ = h.record(us.max(1));
+        }
+    }
+
+    /// 記錄通話建立時間（ms → µs）
+    pub fn record_setup(&self, ms: f64) {
+        let us = (ms * 1000.0) as u64;
+        if let Ok(mut h) = self.setup_hist.lock() {
+            let _ = h.record(us.max(1));
+        }
+    }
+
+    /// 記錄通話持續時間（s → µs）
+    pub fn record_duration(&self, secs: f64) {
+        let us = (secs * 1_000_000.0) as u64;
+        if let Ok(mut h) = self.dur_hist.lock() {
+            let _ = h.record(us.max(1));
+        }
+    }
+
+    /// 依狀態碼分類記錄失敗
+    pub fn record_fail_code(&self, code: u16) {
+        match code {
+            400..=499 => { self.fail_4xx.fetch_add(1, Ordering::Relaxed); }
+            500..=599 => { self.fail_5xx.fetch_add(1, Ordering::Relaxed); }
+            600..=699 => { self.fail_6xx.fetch_add(1, Ordering::Relaxed); }
+            _ => {}
+        }
+    }
+}
+
+// ─── 最終報告 ────────────────────────────────────────────────────
+
+/// 壓測結束後產生的完整報告
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FinalReport {
+    // 通話數量
+    pub calls_initiated: u64,
+    pub calls_answered:  u64,
+    pub calls_completed: u64,
+    pub calls_failed:    u64,
+    pub calls_timeout:   u64,
+
+    // 持續時間
+    pub duration_secs: f64,
+
+    // 關鍵指標
+    /// Answer Seizure Ratio（%）
+    pub asr: f64,
+    /// Call Completion Rate（%）
+    pub ccr: f64,
+    /// 實際 CPS
+    pub actual_cps: f64,
+    /// Average Call Duration（秒）
+    pub acd_secs: f64,
+
+    // PDD 分位數（ms）
+    pub pdd_p50_ms:  f64,
+    pub pdd_p95_ms:  f64,
+    pub pdd_p99_ms:  f64,
+    pub pdd_max_ms:  f64,
+
+    // 建立時間分位數（ms）
+    pub setup_p50_ms: f64,
+    pub setup_p95_ms: f64,
+    pub setup_p99_ms: f64,
+    pub setup_max_ms: f64,
+
+    // 錯誤碼分類
+    pub fail_4xx: u64,
+    pub fail_5xx: u64,
+    pub fail_6xx: u64,
+
+    // ── RTP 聲音品質 ──
+    /// MOS 估算（1.0 ~ 5.0，None = 未啟用 RTP）
+    pub mos:           Option<f64>,
+    /// 掉包率（%）
+    pub loss_rate_pct: Option<f64>,
+    /// Jitter（ms）
+    pub jitter_ms:     Option<f64>,
+    /// 傳送 RTP 封包數
+    pub rtp_sent:      Option<u64>,
+    /// 接收 RTP 封包數
+    pub rtp_recv:      Option<u64>,
+    /// 亂序封包數
+    pub rtp_out_of_order: Option<u64>,
+}
+
+impl FinalReport {
+    /// 輸出為 JSON 字串
+    pub fn to_json(&self) -> String {
+        serde_json::to_string_pretty(self).unwrap_or_default()
+    }
+}

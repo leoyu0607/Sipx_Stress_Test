@@ -1,0 +1,139 @@
+/// 壓測設定結構
+use serde::{Deserialize, Serialize};
+use std::time::Duration;
+
+/// 傳輸層協定
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Transport {
+    Udp,
+    Tcp,
+}
+
+impl Default for Transport {
+    fn default() -> Self {
+        Self::Udp
+    }
+}
+
+impl std::fmt::Display for Transport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Udp => write!(f, "UDP"),
+            Self::Tcp => write!(f, "TCP"),
+        }
+    }
+}
+
+/// 完整壓測設定
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Config {
+    /// 目標 SIP 伺服器（ip:port）
+    pub server_addr: String,
+
+    /// 本機綁定地址（ip:port），None 表示自動
+    pub local_addr: Option<String>,
+
+    /// 本機 SIP domain（用於 From header），None 則取 local_addr 的 IP
+    pub local_domain: Option<String>,
+
+    /// 主叫號碼
+    pub caller_number: String,
+
+    /// 被叫號碼前綴
+    pub callee_prefix: String,
+
+    /// 被叫號碼尾數範圍（0..=callee_range 隨機）
+    pub callee_range: u64,
+
+    /// 每秒通話數（CPS）
+    pub cps: f64,
+
+    /// 最大並發通話數
+    pub max_concurrent_calls: usize,
+
+    /// 壓測持續秒數
+    pub duration_secs: u64,
+
+    /// 單通通話持續秒數（0 = 不主動 BYE）
+    pub call_duration_secs: u64,
+
+    /// INVITE 逾時秒數（未收到 180/200 視為失敗）
+    pub invite_timeout_secs: u64,
+
+    /// 傳輸層
+    pub transport: Transport,
+
+    /// SIP log 輸出目錄
+    pub logs_dir: String,
+
+    /// RTP 起始 port（偶數，預設 10000）
+    pub rtp_base_port: u16,
+
+    /// 音檔路徑（None = 靜音）
+    pub audio_file: Option<std::path::PathBuf>,
+
+    /// 是否啟用 RTP 傳送（false = 只做 SIP signaling）
+    pub enable_rtp: bool,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            server_addr:          "127.0.0.1:5060".to_string(),
+            local_addr:           None,
+            local_domain:         None,
+            caller_number:        "1000".to_string(),
+            callee_prefix:        "2".to_string(),
+            callee_range:         9999,
+            cps:                  10.0,
+            max_concurrent_calls: 100,
+            duration_secs:        60,
+            call_duration_secs:   30,
+            invite_timeout_secs:  8,
+            transport:            Transport::Udp,
+            logs_dir:             "logs".to_string(),
+            rtp_base_port:        10000,
+            audio_file:           None,
+            enable_rtp:           false,
+        }
+    }
+}
+
+impl Config {
+    /// 壓測總時長
+    pub fn duration(&self) -> Duration {
+        Duration::from_secs(self.duration_secs)
+    }
+
+    /// INVITE 逾時
+    pub fn invite_timeout(&self) -> Duration {
+        Duration::from_secs(self.invite_timeout_secs)
+    }
+
+    /// 傳輸層名稱字串（給 SIP message 用）
+    pub fn transport_str(&self) -> &str {
+        match self.transport {
+            Transport::Udp => "UDP",
+            Transport::Tcp => "TCP",
+        }
+    }
+
+    /// 從 CLI 參數快速建構
+    pub fn from_args(
+        server_addr:          impl Into<String>,
+        cps:                  f64,
+        max_concurrent_calls: usize,
+        duration_secs:        u64,
+        call_duration_secs:   u64,
+    ) -> Self {
+        Self {
+            server_addr: server_addr.into(),
+            cps,
+            max_concurrent_calls,
+            duration_secs,
+            call_duration_secs,
+            ..Default::default()
+        }
+    }
+}

@@ -1,0 +1,21 @@
+[package]
+name    = "sipress"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "sipress"
+path = "src/main.rs"
+
+[dependencies]
+sipress-core = { path = "../core" }
+tokio        = { workspace = true }
+anyhow       = { workspace = true }
+serde        = { workspace = true }
+serde_json   = { workspace = true }
+clap         = { version = "4", features = ["derive"] }
+ratatui      = "0.26"
+crossterm    = { version = "0.27", features = ["event-stream"] }
+tracing      = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tokio-stream = "0.1"
