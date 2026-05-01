@@ -117,7 +117,7 @@ sipress/
 
 執行 `sipress-gui-*-portable.exe` 或安裝後開啟，可看到：
 
-- **左側 Sidebar**：填寫伺服器位址、CPS、並發數、**總通數上限**、持續時間、音檔路徑
+- **左側 Sidebar**：填寫伺服器位址、CPS、並發數、**總通數上限**、持續時間（**0 = 不限時間**）、音檔路徑
 - **頂部 TitleBar**：顯示狀態、進度條，▶ Start / ■ Stop 按鈕
 - **中間 MetricStrip**：即時顯示 CPS、CONCUR、**SUCCESS（成功通數）**、**FAILED（失敗通數）**、**QUEUED（佇列通數）**、ASR、**ERR%（Error Rate）**、PDD
 - **圖表區**：折線圖（CPS / ASR / CCR / ERR 趨勢）
@@ -278,8 +278,8 @@ MOS    = 1 + 0.035R + R(R−60)(100−R) × 7×10⁻⁶  ← ITU-T G.107 §B.4
 |------|------|------|------|
 | `--concurrent` | `-c` | `100` | 最大並發通話數 |
 | `--cps` | — | `10.0` | 每秒發起通話數 |
-| `--duration` | `-d` | `60` | 壓測持續時間（秒） |
-| `--max-calls` | — | 不限 | 總通話上限，達到後自動停止（優先於 `--duration`） |
+| `--duration` | `-d` | `60` | 壓測持續時間（秒）；**設為 `0` = 不限時間**，需搭配 `--max-calls` 或手動停止 |
+| `--max-calls` | — | 不限 | 總通話上限，達到且所有進行中通話結束後自動停止 |
 | `--call-duration` | — | `30` | 單通通話持續時間（秒，`0` = 不主動 BYE） |
 | `--invite-timeout` | — | `8` | INVITE 逾時秒數 |
 

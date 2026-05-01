@@ -139,23 +139,31 @@ impl Engine {
 
         // ── Task 2：進度回報 ──
         if let Some(ref cb) = on_progress {
-            let cb        = Arc::clone(cb);
-            let live      = Arc::clone(&live);
-            let duration  = cfg.duration_secs as f64;
+            let cb           = Arc::clone(cb);
+            let live         = Arc::clone(&live);
+            let duration     = cfg.duration_secs as f64;
+            let unlimited    = cfg.duration_secs == 0;
             tokio::spawn(async move {
                 let mut interval = time::interval(Duration::from_secs(1));
                 loop {
                     interval.tick().await;
-                    let elapsed = start.elapsed().as_secs_f64();
-                    cb(live.snapshot(), (elapsed / duration).min(1.0));
-                    if elapsed >= duration { break; }
+                    let elapsed  = start.elapsed().as_secs_f64();
+                    let progress = if unlimited { 0.0 } else { (elapsed / duration).min(1.0) };
+                    cb(live.snapshot(), progress);
+                    if !unlimited && elapsed >= duration { break; }
                 }
             });
         }
 
         // ── 主控迴圈 ──
-        let cps_interval = Duration::from_secs_f64(1.0 / cfg.cps);
-        let deadline     = start + cfg.duration();
+        let cps_interval  = Duration::from_secs_f64(1.0 / cfg.cps);
+        // duration_secs = 0 → 不限時，僅靠 max_total_calls 或手動停止
+        let unlimited_time = cfg.duration_secs == 0;
+        let deadline       = if unlimited_time {
+            start + Duration::from_secs(u64::MAX / 2)
+        } else {
+            start + cfg.duration()
+        };
         let invite_to    = cfg.invite_timeout();
         let call_dur     = Duration::from_secs(cfg.call_duration_secs);
 

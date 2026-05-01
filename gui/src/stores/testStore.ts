@@ -220,7 +220,7 @@ export const useTestStore = defineStore('test', () => {
   const progressPct = computed(() =>
     status.value === 'running' && config.value.duration > 0
       ? Math.min(100, (elapsedSec.value / config.value.duration) * 100)
-      : 0
+      : 0  // duration=0 means unlimited → no progress bar
   )
 
   // ── Log ───────────────────────────────────────────────────────────────────────
@@ -347,7 +347,7 @@ export const useTestStore = defineStore('test', () => {
     try {
       await invoke('start_test', { config: buildRustConfig() })
       addLog('ok',   `test started → ${config.value.server}  [${config.value.mode} mode]`)
-      addLog('info', `duration: ${config.value.duration}s  cps: ${config.value.caller.cps}  concur: ${config.value.caller.concurrency}${config.value.caller.totalCalls > 0 ? `  max-calls: ${config.value.caller.totalCalls}` : ''}`)
+      addLog('info', `duration: ${config.value.duration > 0 ? config.value.duration + 's' : '不限'}  cps: ${config.value.caller.cps}  concur: ${config.value.caller.concurrency}${config.value.caller.totalCalls > 0 ? `  max-calls: ${config.value.caller.totalCalls}` : ''}`)
     } catch (e) {
       addLog('err', `啟動失敗: ${e}`)
       status.value = 'error'
@@ -363,6 +363,7 @@ export const useTestStore = defineStore('test', () => {
 
     clockTimer = setInterval(() => {
       elapsedSec.value++
+      // duration = 0 → unlimited, only stop via max_total_calls or manual stop
       if (config.value.duration > 0 && elapsedSec.value >= config.value.duration) {
         _finishTest()
       }

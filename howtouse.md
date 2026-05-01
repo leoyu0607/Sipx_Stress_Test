@@ -1,242 +1,282 @@
-# sipress — How to Use
+# sipress — 使用說明
 
-## Table of Contents
-1. [Download & Install](#1-download--install)
-2. [GUI Quickstart](#2-gui-quickstart)
-3. [Configure Your Test](#3-configure-your-test)
-4. [Run a Test & Read Live Metrics](#4-run-a-test--read-live-metrics)
-5. [View Results](#5-view-results)
-6. [CLI Usage](#6-cli-usage)
-7. [Troubleshooting](#7-troubleshooting)
+## 目錄
+
+1. [下載與安裝](#1-下載與安裝)
+2. [GUI 快速開始](#2-gui-快速開始)
+3. [設定測試參數](#3-設定測試參數)
+4. [執行測試與讀取即時指標](#4-執行測試與讀取即時指標)
+5. [查看測試結果](#5-查看測試結果)
+6. [CLI 使用方式](#6-cli-使用方式)
+7. [常見問題排除](#7-常見問題排除)
 
 ---
 
-## 1. Download & Install
+## 1. 下載與安裝
 
-### Choose a build for your platform
+### 選擇適合平台的版本
 
-| Platform | Installer (recommended) | Portable (no install) |
-|---|---|---|
-| Windows x64 | `sipress-gui-windows-x86_64-installer.msi` or `*-setup.exe` | `sipress-gui-windows-x86_64-portable.exe` |
+| 平台 | 安裝版（推薦） | 免安裝攜帶版 |
+|------|--------------|------------|
+| Windows x64 | `sipress-gui-windows-x86_64-installer.msi` 或 `*-setup.exe` | `sipress-gui-windows-x86_64-portable.exe` |
 | Linux x64 | `sipress-gui-linux-x86_64-installer.deb` | `sipress-gui-linux-x86_64-portable.AppImage` |
 | macOS x64 | `sipress-gui-macos-x86_64-installer.dmg` | `sipress-gui-macos-x86_64-portable` |
 | macOS ARM | `sipress-gui-macos-arm64-installer.dmg` | `sipress-gui-macos-arm64-portable` |
 
-### Installer vs Portable
+### 安裝版 vs 攜帶版差異
 
-- **Installer** registers the app with your OS (Start Menu shortcut, uninstaller, etc.). Use this for day-to-day desktop use.
-- **Portable** is a single self-contained file. Copy it anywhere, run it directly — nothing is written to your system. Good for servers or shared machines.
+- **安裝版**：向作業系統登錄程式（開始選單捷徑、解除安裝程式）。適合日常桌面使用。
+- **攜帶版**：單一自包含執行檔，複製到任何位置即可執行，不會寫入系統設定。適合伺服器或共用機器。
 
 ### Windows
 
-1. Download the `.msi` or `-setup.exe` installer and run it.
-2. Follow the wizard — accept the license, choose destination, click Install.
-3. Launch **sipress** from the Start Menu or desktop shortcut.
+1. 下載 `.msi` 或 `-setup.exe` 安裝程式並執行。
+2. 依照精靈步驟：接受授權、選擇安裝位置、點選「安裝」。
+3. 從開始選單或桌面捷徑啟動 **sipress**。
 
-> **Portable:** Download `*-portable.exe`, double-click to run. No installation needed.
+> **攜帶版**：下載 `*-portable.exe`，直接雙擊執行，無需安裝。
 
 ### Linux
 
 ```bash
-# Debian/Ubuntu — installer
+# Debian / Ubuntu — 安裝版
 sudo dpkg -i sipress-gui-linux-x86_64-installer.deb
 
-# AppImage — portable (no install)
+# AppImage — 攜帶版（免安裝）
 chmod +x sipress-gui-linux-x86_64-portable.AppImage
 ./sipress-gui-linux-x86_64-portable.AppImage
 ```
 
 ### macOS
 
-1. Open the `.dmg` file and drag **sipress** to your Applications folder.
-2. Launch from Applications or Spotlight.
+1. 開啟 `.dmg` 檔案，將 **sipress** 拖曳到「應用程式」資料夾。
+2. 從 Launchpad 或 Spotlight 搜尋啟動。
 
-> **First launch:** macOS may block unsigned apps. Go to **System Settings → Privacy & Security** and click **Open Anyway**.
+> **首次啟動**：macOS 可能封鎖未簽章的程式。請至**系統設定 → 隱私權與安全性**，點選**「仍要開啟」**。
+> 或在終端機執行：`xattr -c sipress-gui-macos-*-portable`
 
 ---
 
-## 2. GUI Quickstart
+## 2. GUI 快速開始
 
-When sipress opens you'll see:
+啟動 sipress 後可看到以下版面配置：
 
 ```
-┌─ Title bar ──────────────────────────────── [─] [□] [✕] ─┐
-│  ┌─ Sidebar ──────────┐  ┌─ Main panel ──────────────────┐ │
-│  │  Test Config       │  │  Metrics / Live charts        │ │
-│  │  • Server          │  │                               │ │
-│  │  • Transport       │  │  Logs                         │ │
-│  │  • Caller settings │  │                               │ │
-│  │  • Duration        │  │                               │ │
-│  │                    │  │                               │ │
-│  │  [▶ Start]         │  │                               │ │
-│  └────────────────────┘  └───────────────────────────────┘ │
-└────────────────────────────────────────────────────────────┘
+┌─ 標題列（可拖曳移動）──────────────────── [─] [□] [✕] ─┐
+│  指標列：CPS | CONCUR | SUCCESS | FAILED | QUEUED | ASR | ERR% | PDD │
+│  ┌─ 左側欄 ──────────┐  ┌─ 圖表區 ──────────────────┐  │
+│  │  目標設定          │  │  折線圖（CPS/ASR/MOS…）   │  │
+│  │  ─────────────── │  └──────────────────────────┘  │
+│  │  民眾端設定        │  ┌─ SIP 日誌 ─────────────────┐ │
+│  │  • 接入號          │  │  即時訊息流                 │ │
+│  │  • 併發數 / CPS   │  └──────────────────────────┘  │
+│  │  • 總通數          │  ┌─ 右側面板 ──────────────────┐ │
+│  │  • 持續時間        │  │  通話狀態 | 回應碼           │ │
+│  │  • 音檔            │  │  RTP 品質 | SIP 流程          │ │
+│  │  [▶ 開始測試]      │  └──────────────────────────┘  │
+│  └────────────────── ┘                                  │
+└──────────────────────────────────────────────────────────┘
 ```
 
-- **Sidebar** — fill in your target server and call parameters, then press **Start**.
-- **Main panel** — shows live CPS, concurrent calls, ASR, PDD and a scrolling log.
-- **Title bar** — draggable; close/minimize/maximize buttons on the right.
+---
+
+## 3. 設定測試參數
+
+### 目標設定
+
+| 欄位 | 範例 | 說明 |
+|------|------|------|
+| SIP 伺服器 | `192.168.1.100:5060` | 目標 SIP Proxy 的 IP 與 Port |
+| 傳輸層 | `UDP` / `TCP` / `TLS` | 須與伺服器設定一致 |
+| 本機 Port | `5080` | 留空則由作業系統自動分配 |
+| 持續時間（秒）| `60` | **設為 0 = 不限時間**，需搭配總通數或手動停止 |
+
+### 民眾端設定
+
+| 欄位 | 範例 | 說明 |
+|------|------|------|
+| 交換機接入號 | `4008001234` | From 標頭中的主叫號碼 |
+| 併發數量 | `100` | 最大同時進行中通話數 |
+| 呼叫頻率 CPS | `10` | 每秒發起的新通話數 |
+| 總測試通數 | `500` | **設為 0 = 不限通數**，依持續時間決定結束 |
+
+> **停止條件優先順序**
+> 1. 手動按下「■ 停止測試」
+> 2. 總通數達到上限（若 > 0，且目前通話全部結束）
+> 3. 持續時間到期（若 > 0）
+>
+> 若兩者皆設為 0，測試不會自動停止，必須手動停止。
+
+### 音訊設定（選用）
+
+啟用「播放音檔」開關後：
+
+1. 點選「瀏覽」開啟系統檔案選擇器。
+2. 選擇音檔（支援 `.wav`、`.pcm`、`.raw`，建議 8kHz / 16-bit mono）。
+3. 每通接通的通話都會傳送 RTP 音訊封包並計算 MOS 聲音品質分數。
+
+停用音訊為純 SIP 信令測試（速度較快、CPU 使用率較低）。
 
 ---
 
-## 3. Configure Your Test
+## 4. 執行測試與讀取即時指標
 
-All settings are in the left sidebar.
+### 啟動測試
 
-### Server
+1. 填寫「SIP 伺服器」與「交換機接入號」（最少必填）。
+2. 點選標題列的 **▶ 開始測試**。
+3. 指標列每秒自動更新：
 
-| Field | Example | Notes |
-|---|---|---|
-| Server address | `192.168.1.100:5060` | SIP proxy IP and port |
-| Transport | `UDP` / `TCP` / `TLS` | Match your server config |
-| Local port | `5080` | Leave blank for OS-assigned |
+| 指標 | 意義 | 健康參考值 |
+|------|------|----------|
+| **CPS** | 每秒實際發起的通話數 | 接近設定值 |
+| **CONCUR** | 目前進行中的通話數 | ≤ 設定的併發上限 |
+| **SUCCESS** | 累計成功接通通數（200 OK） | 越高越好 |
+| **FAILED** | 累計失敗通數（含逾時） | 越低越好 |
+| **QUEUED** | 目前等待回應的 INVITE 數量 | 接近 CONCUR |
+| **ASR** | 接通率（%） | ≥ 85% 優、≥ 70% 普通 |
+| **ERR%** | 失敗率（%） | ≤ 5% 正常 |
+| **PDD** | 平均撥後延遲（ms） | < 200ms 正常 |
 
-### Caller
+### 圖表標籤頁
 
-| Field | Example | Notes |
-|---|---|---|
-| Caller number | `+886912345678` | From-header number |
-| CPS | `10` | Calls per second |
-| Concurrency | `50` | Max simultaneous calls |
+| 標籤 | 顯示內容 |
+|------|---------|
+| CPS | 每秒發起量趨勢 |
+| CONC | 併發數趨勢 |
+| ASR | 接通率趨勢 |
+| CCR | 完成率趨勢 |
+| PDD | 延遲趨勢 |
+| FAIL | 失敗累計趨勢 |
+| MOS | 聲音品質趨勢（需啟用 RTP） |
 
-### Test Duration
+### 右側面板
 
-Set how many seconds the test should run. The countdown timer appears once started.
+- **通話狀態**：INVITE → 100 Trying → 180 Ringing → 200 OK → ACK → BYE 各狀態比例
+- **RTP 聲音品質**（啟用音訊後顯示）：
+  - **MOS**：1.0–5.0，≥ 4.0 優、≥ 3.0 普通、< 2.5 差
+  - **掉包率（%）**：< 1% 優、< 3% 普通、≥ 3% 差
+  - **Jitter（ms）**：< 30ms 優、< 60ms 普通、≥ 60ms 差
+- **回應碼統計**：每個 SIP 回應碼的累計次數
+- **最後通話 SIP 流程**：最近一通通話的時序圖
 
-### Audio (optional)
+### 停止測試
 
-Enable the **Audio** toggle to send RTP audio during calls.  
-Click **Browse** to select a `.wav`, `.pcm`, or `.raw` file.  
-Leave disabled for signalling-only tests (faster, less CPU).
-
----
-
-## 4. Run a Test & Read Live Metrics
-
-1. Fill in all required fields (server address and caller number at minimum).
-2. Click **▶ Start**.
-3. Watch the metrics panel update every second:
-
-| Metric | What it means |
-|---|---|
-| **CPS** | Calls initiated per second (real-time delta) |
-| **Concurrent** | Calls currently in progress |
-| **Total initiated** | Cumulative calls sent since test start |
-| **ASR** | Answer-Seizure Ratio — `answered / initiated × 100 %` |
-| **PDD (ms)** | Post-Dial Delay — average time from INVITE to 180/200 |
-| **MOS** | Mean Opinion Score for audio quality (0–5, needs RTP) |
-
-4. The **Logs** panel shows real-time SIP events (INVITE, 200 OK, BYE, errors).
-
-5. To stop early, click **■ Stop**. The test will finalize and show the summary report.
+點選 **■ 停止測試**，測試立即停止，並顯示最終結果。
 
 ---
 
-## 5. View Results
+## 5. 查看測試結果
 
-When the test finishes (timer expires or you click Stop) the report panel shows:
+測試結束後（時間到、通數上限、或手動停止），指標固定為最終值，日誌最後一行顯示摘要。
 
-- Total calls initiated / answered / failed
-- Final ASR %
-- Average / min / max PDD
-- Average MOS (if RTP was enabled)
-- Per-error-code breakdown (e.g. 404, 486, 503 counts)
+### 匯出報告
 
-Results are also saved as a JSON file in the `logs/` directory next to the executable.
+| 按鈕 | 格式 | 用途 |
+|------|------|------|
+| ↓ JSON | `sipress_<時間戳>.json` | CI/CD 整合、程式讀取 |
+| ↓ CSV | `sipress_<時間戳>.csv` | Excel、Python 分析 |
 
 ---
 
-## 6. CLI Usage
+## 6. CLI 使用方式
 
-The `sipress` CLI is for scripted or headless environments.
+適合腳本化或無桌面的伺服器環境。
 
-### Basic run
+### 基本範例
 
 ```bash
-sipress run \
-  --server 192.168.1.100:5060 \
-  --caller +886912345678 \
-  --cps 10 \
-  --concurrency 50 \
-  --duration 60
+# 最基本：100 併發、10 CPS、持續 60 秒
+./sipress -s 192.168.1.100:5060 \
+  --number 4008001234 \
+  -c 100 --cps 10 -d 60
+
+# 不限時間，共測試 1000 通
+./sipress -s 192.168.1.100:5060 \
+  --number 4008001234 \
+  -c 50 --cps 5 -d 0 --max-calls 1000
+
+# 啟用 RTP 音訊
+./sipress -s 192.168.1.100:5060 \
+  --number 4008001234 \
+  -c 100 --cps 10 -d 60 \
+  --audio /path/to/sample.wav
+
+# 輸出 JSON 報告
+./sipress -s 192.168.1.100:5060 \
+  --number 4008001234 \
+  -c 100 --cps 10 -d 60 --format json
 ```
 
-### All flags
+### 完整參數列表
 
 ```
-USAGE:
-    sipress run [OPTIONS]
-
-OPTIONS:
-    --server <ADDR>         SIP server address (host:port)
-    --transport <T>         udp | tcp | tls  [default: udp]
-    --local-port <PORT>     Local SIP port (optional)
-    --caller <NUM>          Caller number (From header)
-    --cps <N>               Calls per second  [default: 10]
-    --concurrency <N>       Max concurrent calls  [default: 50]
-    --duration <SECS>       Test duration in seconds  [default: 60]
-    --call-duration <SECS>  Max call hold time  [default: 30]
-    --invite-timeout <SECS> INVITE timeout  [default: 8]
-    --audio <FILE>          WAV/PCM file for RTP audio
-    --rtp-base-port <PORT>  First RTP port  [default: 10000]
-    --logs-dir <DIR>        Log output directory  [default: logs]
+--server / -s <位址>       SIP 伺服器 host:port
+--transport <協定>          udp | tcp | tls（預設：udp）
+--number <號碼>             主叫號碼（From 標頭）
+--concurrent / -c <N>      最大同時通話數（預設：100）
+--cps <N>                  每秒通話數（預設：10）
+--duration / -d <秒>        測試時長，0 = 不限（預設：60）
+--max-calls <N>            總通話上限，0 = 不限
+--call-duration <秒>        單通通話持續時間（預設：30）
+--invite-timeout <秒>       INVITE 逾時（預設：8）
+--audio <檔案>              WAV/PCM 音檔（啟用 RTP）
+--rtp-base-port <Port>     RTP 起始 Port（預設：10000）
+--format <格式>             table | json | csv（預設：table）
+--logs-dir <目錄>           Log 輸出目錄（預設：logs）
+--tui                      啟用即時儀表板介面
 ```
 
-### Example — 30-second TLS test with audio
+---
+
+## 7. 常見問題排除
+
+### macOS 顯示「無法打開，因為無法驗證開發者」
 
 ```bash
-sipress run \
-  --server sip.example.com:5061 \
-  --transport tls \
-  --caller 1000 \
-  --cps 5 \
-  --concurrency 20 \
-  --duration 30 \
-  --audio samples/speech_8k.wav
+xattr -c sipress-gui-macos-*-portable
 ```
+或至**系統設定 → 隱私權與安全性**，點選**「仍要開啟」**。
+
+### 完全沒有通話被發出
+
+- 用 `ping` 或 `nc -u <host> <port>` 確認伺服器可連線
+- 確認防火牆允許對外 UDP/TCP Port 5060
+- 確認主叫號碼格式符合伺服器要求
+
+### 所有通話回傳 403 / 401（認證失敗）
+
+sipress 目前支援無認證的 INVITE 流程。請在 SIP 伺服器端將測試來源 IP 加入白名單，或對該測試 Trunk 停用認證。
+
+### 大量通話失敗
+
+| 錯誤碼 | 原因 | 處理方式 |
+|--------|------|---------|
+| 486 Busy Here | 伺服器過載 | 降低 CPS 或併發數 |
+| 503 Service Unavailable | 伺服器離線 | 確認伺服器狀態 |
+| 408 Timeout / ERR% ≈ 100% | 伺服器不存在或網路不通 | 這是正確行為；所有通話會在 `invite_timeout` 後標記為逾時失敗 |
+
+### MOS 顯示 0 或 N/A
+
+1. 確認已啟用「播放音檔」並選擇有效的音檔。
+2. 確認伺服器接受 RTP 媒體流（有接通的通話才會計算 MOS）。
+
+### GUI 顯示空白視窗
+
+刪除設定後重新啟動：
+- Windows：刪除 `%APPDATA%\com.leozh.sipress`
+- Linux：刪除 `~/.config/com.leozh.sipress`
+
+### 持續時間設為 0 但測試不停止
+
+`duration = 0` 需搭配以下其中一項才能自動停止：
+- 設定「總測試通數」為 > 0
+- 手動按下「■ 停止測試」
+
+### Log 檔案位置
+
+Log 輸出至執行檔同目錄的 `logs/` 資料夾（攜帶版），或使用者應用程式資料目錄（安裝版）。
 
 ---
 
-## 7. Troubleshooting
-
-### App won't launch on macOS
-
-Go to **System Settings → Privacy & Security → Open Anyway** for sipress.  
-Or run `xattr -c sipress-gui-macos-*-portable` in Terminal first.
-
-### No calls are being sent
-
-- Verify the server address and port are reachable (`ping`, `nc -u <host> <port>`).
-- Check that your firewall allows outbound UDP/TCP on port 5060.
-- Confirm the caller number format matches what the server expects.
-
-### All calls return 403 / 401
-
-Your SIP server requires authentication. sipress currently supports unauthenticated INVITE flows; configure your server to whitelist the test source IP or disable auth for the test trunk.
-
-### High failed-call count
-
-- **486 Busy Here** — Server is overloaded; reduce CPS or concurrency.
-- **503 Service Unavailable** — Server is down or rejecting connections.
-- **408 Timeout** — Network latency or server not responding; check connectivity.
-
-### MOS shows 0 / N/A
-
-MOS is only calculated when **Audio** is enabled and RTP packets are exchanged.  
-Make sure you selected a valid `.wav` / `.pcm` file and the server is accepting RTP.
-
-### GUI shows blank window
-
-The frontend failed to load. Try:
-1. Delete `%APPDATA%\com.leozh.sipress` (Windows) or `~/.config/com.leozh.sipress` (Linux).
-2. Reinstall using the installer package.
-
-### Log files location
-
-Logs are written to the `logs/` directory in the same folder as the executable (portable) or in your user data directory (installed version).
-
----
-
-## Need help?
-
-Open an issue at the project repository or check the `README.md` for architecture details and build instructions.
+如需進一步協助，請在專案 Repository 開 Issue，或參閱 `README.md` 取得完整架構說明。

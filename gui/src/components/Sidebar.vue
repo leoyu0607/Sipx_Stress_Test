@@ -99,11 +99,12 @@ function statusLabel(s: string) {
           </div>
         </div>
         <div class="field">
-          <label>duration (s) <span class="tag">--duration</span></label>
+          <label>持續時間 (s) <span class="tag">--duration</span></label>
           <div class="slider-row">
-            <input type="range" min="10" max="3600" v-model.number="store.config.duration">
-            <input type="number" min="1" v-model.number="store.config.duration" class="num-input">
+            <input type="range" min="0" max="3600" v-model.number="store.config.duration">
+            <input type="number" min="0" v-model.number="store.config.duration" class="num-input">
           </div>
+          <div class="field-hint">{{ store.config.duration === 0 ? '0 = 不限時間（需搭配總通數或手動停止）' : `${store.config.duration} 秒後自動停止` }}</div>
         </div>
       </div>
     </div>
