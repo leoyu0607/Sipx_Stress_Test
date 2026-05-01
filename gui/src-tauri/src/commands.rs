@@ -2,6 +2,7 @@
 use sipress_core::{
     config::Config,
     engine::{Engine, ProgressCallback},
+    html_reporter::HtmlReporter,
     stats::{FinalReport, StatsSnapshot},
 };
 use std::sync::{Arc, Mutex};
@@ -101,4 +102,16 @@ pub fn get_report(
     state: State<'_, Arc<AppState>>,
 ) -> Option<FinalReport> {
     state.report.lock().unwrap().clone()
+}
+
+/// 產生 HTML 報告字串（前端負責下載或開啟）
+#[tauri::command]
+pub fn get_html_report(
+    state:       State<'_, Arc<AppState>>,
+    server_addr: String,
+    timestamp:   String,
+) -> Result<String, String> {
+    let report = state.report.lock().unwrap().clone()
+        .ok_or_else(|| "尚無測試結果，請先完成或停止一次壓測".to_string())?;
+    Ok(HtmlReporter::render(&report, &timestamp, &server_addr))
 }

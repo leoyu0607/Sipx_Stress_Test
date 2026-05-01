@@ -480,6 +480,26 @@ export const useTestStore = defineStore('test', () => {
     const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'sipress_accounts.csv'; a.click()
   }
 
+  async function exportHtml() {
+    try {
+      const d   = new Date()
+      const pad = (n: number) => String(n).padStart(2, '0')
+      const ts  = `${d.getFullYear()}${pad(d.getMonth()+1)}${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`
+      const html = await invoke<string>('get_html_report', {
+        serverAddr: config.value.server,
+        timestamp:  ts,
+      })
+      const blob = new Blob([html], { type: 'text/html' })
+      const a = document.createElement('a')
+      a.href = URL.createObjectURL(blob)
+      a.download = `sipress_${ts}.html`
+      a.click()
+      addLog('ok', `HTML 報告已匯出 → sipress_${ts}.html`)
+    } catch (e) {
+      addLog('err', `HTML 報告匯出失敗: ${e}`)
+    }
+  }
+
   return {
     config, status, elapsedSec, metrics, series,
     callStates, respCodes, logs, flowTimes,
@@ -490,6 +510,6 @@ export const useTestStore = defineStore('test', () => {
     generateAccounts, removeAccount, clearAccounts, updateAccount,
     importAccountText, parseAccountText,
     startTest, stopTest,
-    exportJson, exportCsv, exportAccountsCsv,
+    exportJson, exportCsv, exportHtml, exportAccountsCsv,
   }
 })

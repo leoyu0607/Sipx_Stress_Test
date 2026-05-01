@@ -6,15 +6,15 @@ use std::{fs, path::PathBuf};
 pub struct HtmlReporter;
 
 impl HtmlReporter {
-    pub fn save(report: &FinalReport, output_dir: &str, timestamp: &str) -> Result<PathBuf> {
+    pub fn save(report: &FinalReport, output_dir: &str, timestamp: &str, server_addr: &str) -> Result<PathBuf> {
         fs::create_dir_all(output_dir)?;
         let filename = format!("{}_report.html", timestamp);
         let path = PathBuf::from(output_dir).join(&filename);
-        fs::write(&path, Self::render(report, timestamp))?;
+        fs::write(&path, Self::render(report, timestamp, server_addr))?;
         Ok(path)
     }
 
-    pub fn render(r: &FinalReport, timestamp: &str) -> String {
+    pub fn render(r: &FinalReport, timestamp: &str, server_addr: &str) -> String {
         let asr_cls = kpi_cls(r.asr, 85.0, 70.0);
         let ccr_cls = kpi_cls(r.ccr, 85.0, 70.0);
         let fail_total = r.fail_4xx + r.fail_5xx + r.fail_6xx;
@@ -252,7 +252,7 @@ body{{background:var(--bg);color:var(--text);font-family:var(--sans);font-size:1
 <footer class="footer">sipress v0.1 &nbsp;·&nbsp; 報告產生時間 {ts} &nbsp;·&nbsp; 測試時長 {dur:.1}s</footer>
 </body></html>"#,
             ts         = timestamp,
-            server     = "SIP Server",
+            server     = server_addr,
             dur        = r.duration_secs,
             cps        = r.actual_cps,
             asr        = r.asr,

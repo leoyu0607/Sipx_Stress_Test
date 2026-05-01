@@ -75,6 +75,9 @@ function toggleTest() {
       <button class="btn btn-sm"
               @click="store.exportCsv()"
               :disabled="store.series.cps.length === 0">↓ CSV</button>
+      <button class="btn btn-sm"
+              @click="store.exportHtml()"
+              :disabled="store.status === 'idle' || store.status === 'running'">↓ HTML</button>
 
       <div class="sep-v"></div>
 

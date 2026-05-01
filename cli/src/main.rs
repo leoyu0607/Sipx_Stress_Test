@@ -91,7 +91,7 @@ async fn main() -> Result<()> {
 
         if args.html {
             let ts = report_timestamp();
-            match HtmlReporter::save(&report, &args.report_dir, &ts) {
+            match HtmlReporter::save(&report, &args.report_dir, &ts, &args.server) {
                 Ok(path) => eprintln!("[sipress] HTML 報告 → {}", path.display()),
                 Err(e)   => eprintln!("[sipress] HTML 報告失敗：{}", e),
             }
@@ -120,7 +120,7 @@ async fn main() -> Result<()> {
 
         if args.html {
             let ts = report_timestamp();
-            match HtmlReporter::save(&report, &args.report_dir, &ts) {
+            match HtmlReporter::save(&report, &args.report_dir, &ts, &args.server) {
                 Ok(path) => eprintln!("[sipress] HTML 報告 → {}", path.display()),
                 Err(e)   => eprintln!("[sipress] HTML 報告失敗：{}", e),
             }
