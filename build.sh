@@ -8,7 +8,7 @@ OUT="dist"
 BIN="sipress"
 GUI_DIR="gui"
 GUI_BIN="sipress-gui"
-GUI_TARGET_DIR="$GUI_DIR/src-tauri/target/release"
+GUI_TARGET_DIR="target/release"
 GUI_BUNDLE_DIR="$GUI_TARGET_DIR/bundle"
 
 # ── Colored output ────────────────────────────────────────────────

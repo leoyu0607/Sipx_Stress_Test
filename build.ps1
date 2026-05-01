@@ -9,7 +9,7 @@ $OUT          = "dist"
 $CARGO        = "cli\Cargo.toml"
 $GUI_DIR      = "gui"
 $GUI_BIN      = "sipress-gui"
-$GUI_RELEASE  = "$GUI_DIR\src-tauri\target\release"
+$GUI_RELEASE  = "target\release"
 $GUI_BUNDLE   = "$GUI_RELEASE\bundle"
 
 # ── Output helpers ─────────────────────────────────────────────────
