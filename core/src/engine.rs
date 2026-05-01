@@ -1,5 +1,5 @@
 /// SIP 壓測主引擎
-use crate::config::{Config, Transport};
+use crate::config::Config;
 use crate::rtp::{
     session::{RtpSession, RtpSessionConfig},
     stats::RtpStatsSnapshot,
@@ -27,10 +27,12 @@ pub struct Engine {
 #[derive(Debug)]
 enum SipEvent {
     Response {
-        call_id: String,
-        code:    u16,
-        to_tag:  Option<String>,
-        method:  Option<String>,
+        call_id:         String,
+        code:            u16,
+        to_tag:          Option<String>,
+        method:          Option<String>,
+        /// 從 200 OK SDP 解析出的對端 RTP port（其餘回應為 None）
+        remote_rtp_port: Option<u16>,
     },
 }
 
@@ -53,7 +55,10 @@ impl Engine {
             SipLogger::new(&cfg.logs_dir, SipRole::Agent)
                 .unwrap_or_else(|e| {
                     eprintln!("[sipress] 警告：無法建立 SIP log：{}", e);
-                    SipLogger::new("/tmp", SipRole::Agent).unwrap()
+                    let tmp = std::env::temp_dir();
+                    let tmp_str = tmp.to_string_lossy();
+                    SipLogger::new(tmp_str.as_ref(), SipRole::Agent)
+                        .expect("無法在系統暫存目錄建立 SIP log")
                 })
         );
         eprintln!("[sipress] SIP log → {}", sip_log.path.display());
@@ -112,6 +117,13 @@ impl Engine {
                 let to_tag = SipResponse::to_tag(&raw);
                 let method = SipResponse::cseq_method(&raw);
 
+                // 只有 200 OK for INVITE 才需解析 SDP
+                let remote_rtp_port = if code == Some(200) {
+                    SipResponse::sdp_rtp_port(&raw)
+                } else {
+                    None
+                };
+
                 let call_id = raw.lines()
                     .find(|l| l.to_lowercase().starts_with("call-id:"))
                     .and_then(|l| l.splitn(2, ':').nth(1))
@@ -119,7 +131,7 @@ impl Engine {
 
                 if let (Some(call_id), Some(code)) = (call_id, code) {
                     let _ = ev_tx2.send(SipEvent::Response {
-                        call_id, code, to_tag, method,
+                        call_id, code, to_tag, method, remote_rtp_port,
                     });
                 }
             }
@@ -154,7 +166,7 @@ impl Engine {
 
             // ① 處理所有收到的 SIP 回應
             while let Ok(ev) = ev_rx.try_recv() {
-                let SipEvent::Response { call_id, code, to_tag, method } = ev;
+                let SipEvent::Response { call_id, code, to_tag, method, remote_rtp_port } = ev;
                 let mut dialogs = dialogs.lock().await;
 
                 if let Some(dialog) = dialogs.get_mut(&call_id) {
@@ -178,17 +190,17 @@ impl Engine {
                             // 啟動 RTP session（若已啟用）
                             if cfg.enable_rtp {
                                 let pure_ip = local_ip.split(':').next().unwrap_or("0.0.0.0").to_string();
+                                let server_ip = cfg.server_addr.split(':').next().unwrap_or("127.0.0.1");
+                                // 優先使用 SDP 解析的對端 port，fallback 為 16384
+                                let remote_port = remote_rtp_port.unwrap_or(16384);
+                                let local_pre = dialog.local_rtp_port;
                                 let rtp_cfg = RtpSessionConfig {
                                     base_port:   cfg.rtp_base_port,
                                     local_ip:    pure_ip,
-                                    // 對端 RTP：使用 server IP + port 預設 (16384)
-                                    // 實際應從 SDP 解析，此處簡化
-                                    remote_addr: format!(
-                                        "{}:16384",
-                                        cfg.server_addr.split(':').next().unwrap_or("127.0.0.1")
-                                    ),
+                                    remote_addr: format!("{}:{}", server_ip, remote_port),
                                     audio_file:  cfg.audio_file.clone(),
                                     ssrc:        None,
+                                    local_port:  if local_pre > 0 { Some(local_pre) } else { None },
                                 };
                                 let pc = Arc::clone(&rtp_port_counter);
                                 let rtp_sessions_clone = Arc::clone(&rtp_sessions);
@@ -265,10 +277,23 @@ impl Engine {
 
                 for dialog in dialogs.values_mut() {
                     match &dialog.state {
-                        // 逾時檢查
+                        // 逾時檢查 — 發送 CANCEL 再標記逾時（RFC 3261 §9）
                         DialogState::Calling | DialogState::Trying | DialogState::Ringing => {
                             if now.duration_since(dialog.invite_sent_at) > invite_to {
-                                sip_log.log_event(&dialog.call_id, "TIMEOUT — 未收到 180/200");
+                                sip_log.log_event(&dialog.call_id, "TIMEOUT — 發送 CANCEL");
+                                let cancel = SipMessage::cancel(
+                                    &dialog.call_id,
+                                    &cfg.caller_number,
+                                    local_domain,
+                                    &dialog.callee,
+                                    &cfg.server_addr,
+                                    &local_addr,
+                                    dialog.cseq,
+                                    &dialog.branch,
+                                    &dialog.from_tag,
+                                    "UDP",
+                                );
+                                to_send.push(cancel);
                                 dialog.on_timeout();
                                 live.on_timeout();
                             }
@@ -344,6 +369,22 @@ impl Engine {
                     let from_tag = SipMessage::new_tag();
                     let branch   = SipMessage::new_branch();
 
+                    // 若啟用 RTP，在送 INVITE 前預先分配本機 RTP port
+                    // 確保 SDP 中宣告的 port 與後續 RTP session 一致
+                    let rtp_port = if cfg.enable_rtp {
+                        let pc = Arc::clone(&rtp_port_counter);
+                        let ip = local_ip.split(':').next().unwrap_or("0.0.0.0").to_string();
+                        match crate::rtp::session::RtpSession::allocate_port(&pc, &ip).await {
+                            Ok(p)  => p,
+                            Err(e) => {
+                                tracing::warn!("RTP port 預分配失敗: {}", e);
+                                cfg.rtp_base_port
+                            }
+                        }
+                    } else {
+                        0 // RTP 未啟用，port 佔位
+                    };
+
                     let invite = SipMessage::invite(
                         &call_id,
                         &cfg.caller_number,
@@ -355,9 +396,10 @@ impl Engine {
                         &branch,
                         &from_tag,
                         "UDP",
+                        if rtp_port > 0 { rtp_port } else { 9 }, // port 9 = SDP 停用媒體
                     );
 
-                    let dialog = Dialog::new(call_id.clone(), from_tag, branch, callee);
+                    let dialog = Dialog::new(call_id.clone(), from_tag, branch, callee, rtp_port);
                     dialogs.lock().await.insert(call_id, dialog);
                     live.on_invite();
 
@@ -386,8 +428,8 @@ impl Engine {
         }
 
         // ── 產生最終報告 ──
-        let snap      = live.snapshot();
-        let elapsed   = start.elapsed().as_secs_f64();
+        let snap    = live.snapshot();
+        let elapsed = start.elapsed().as_secs_f64();
 
         // 寫摘要到 SIP log 尾端
         sip_log.log_summary(&format!(
@@ -395,16 +437,8 @@ impl Engine {
             snap.calls_initiated, snap.calls_answered, snap.calls_completed,
             snap.calls_failed, snap.calls_timeout, snap.asr, elapsed,
         ));
-        let pdd_h     = detail.pdd_hist.lock().unwrap();
-        let setup_h   = detail.setup_hist.lock().unwrap();
-        let dur_h     = detail.dur_hist.lock().unwrap();
 
-        let us_to_ms  = |h: &hdrhistogram::Histogram<u64>, q: f64| h.value_at_quantile(q) as f64 / 1000.0;
-        let acd = if snap.calls_completed > 0 {
-            dur_h.mean() / 1000.0  // ms → s
-        } else { 0.0 };
-
-        // ── 聚合 RTP 統計 ──
+        // ── 聚合 RTP 統計（有 .await，必須在取得 std::sync::MutexGuard 前完成）──
         let rtp_agg: Option<(f64, f64, f64, u64, u64, u64)> = if cfg.enable_rtp {
             // 停止仍在執行的 RTP sessions（通話未正常結束）
             {
@@ -431,6 +465,27 @@ impl Engine {
             None
         };
 
+        // 取得 histogram 數據（std::sync::MutexGuard，不可跨 await 存活）
+        // 所有 .await 均已在此之前完成
+        let us_to_ms = |h: &hdrhistogram::Histogram<u64>, q: f64| {
+            h.value_at_quantile(q) as f64 / 1000.0
+        };
+        let (pdd_p50, pdd_p95, pdd_p99, pdd_max,
+             setup_p50, setup_p95, setup_p99, setup_max,
+             acd_secs) = {
+            let pdd_h   = detail.pdd_hist.lock().unwrap();
+            let setup_h = detail.setup_hist.lock().unwrap();
+            let dur_h   = detail.dur_hist.lock().unwrap();
+            let acd = if snap.calls_completed > 0 { dur_h.mean() / 1000.0 } else { 0.0 };
+            (
+                us_to_ms(&pdd_h, 0.50), us_to_ms(&pdd_h, 0.95),
+                us_to_ms(&pdd_h, 0.99), pdd_h.max() as f64 / 1000.0,
+                us_to_ms(&setup_h, 0.50), us_to_ms(&setup_h, 0.95),
+                us_to_ms(&setup_h, 0.99), setup_h.max() as f64 / 1000.0,
+                acd,
+            )
+        };
+
         Ok(FinalReport {
             calls_initiated: snap.calls_initiated,
             calls_answered:  snap.calls_answered,
@@ -443,15 +498,15 @@ impl Engine {
                 snap.calls_completed as f64 / snap.calls_initiated as f64 * 100.0
             } else { 0.0 },
             actual_cps: snap.calls_initiated as f64 / elapsed,
-            pdd_p50_ms:  us_to_ms(&pdd_h, 0.50),
-            pdd_p95_ms:  us_to_ms(&pdd_h, 0.95),
-            pdd_p99_ms:  us_to_ms(&pdd_h, 0.99),
-            pdd_max_ms:  pdd_h.max() as f64 / 1000.0,
-            setup_p50_ms: us_to_ms(&setup_h, 0.50),
-            setup_p95_ms: us_to_ms(&setup_h, 0.95),
-            setup_p99_ms: us_to_ms(&setup_h, 0.99),
-            setup_max_ms: setup_h.max() as f64 / 1000.0,
-            acd_secs:    acd,
+            pdd_p50_ms:   pdd_p50,
+            pdd_p95_ms:   pdd_p95,
+            pdd_p99_ms:   pdd_p99,
+            pdd_max_ms:   pdd_max,
+            setup_p50_ms: setup_p50,
+            setup_p95_ms: setup_p95,
+            setup_p99_ms: setup_p99,
+            setup_max_ms: setup_max,
+            acd_secs:     acd_secs,
             fail_4xx: detail.fail_4xx.load(std::sync::atomic::Ordering::Relaxed),
             fail_5xx: detail.fail_5xx.load(std::sync::atomic::Ordering::Relaxed),
             fail_6xx: detail.fail_6xx.load(std::sync::atomic::Ordering::Relaxed),

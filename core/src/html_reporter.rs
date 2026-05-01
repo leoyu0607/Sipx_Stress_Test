@@ -318,16 +318,17 @@ fn ring_svg(ratio: f64, label: &str, color: &str) -> String {
     let ex = cx + r * a.sin();
     let ey = cy - r * a.cos();
     let large = if a > PI { 1 } else { 0 };
-    format!(r#"<div style="display:flex;flex-direction:column;align-items:center;gap:4px">
+    // 注意：使用 r##"..."## 避免 SVG hex 顏色中的 "#..." 提前終止 r#"..."# raw string
+    format!(r##"<div style="display:flex;flex-direction:column;align-items:center;gap:4px">
 <svg width="110" height="110" viewBox="0 0 110 110">
   <circle cx="{cx}" cy="{cy}" r="{r}" fill="none" stroke="#dde1e9" stroke-width="{sw}"/>
   <path d="M {cx} {sy} A {r} {r} 0 {large} 1 {ex:.2} {ey:.2}"
     fill="none" stroke="{color}" stroke-width="{sw}" stroke-linecap="round"/>
-  <text x="{cx}" y="51" text-anchor="middle" font-family="'DM Mono',monospace"
+  <text x="{cx}" y="51" text-anchor="middle" font-family="DM Mono,monospace"
     font-size="15" font-weight="500" fill="#1a2035">{pct:.0}%</text>
-  <text x="{cx}" y="66" text-anchor="middle" font-family="'Lato',sans-serif"
+  <text x="{cx}" y="66" text-anchor="middle" font-family="Lato,sans-serif"
     font-size="10" fill="#9ba3b8">{label}</text>
-</svg></div>"#,
+</svg></div>"##,
         cx=cx, cy=cy, r=r, sw=sw, sy=cy-r,
         ex=ex, ey=ey, large=large, color=color,
         pct=ratio*100.0, label=label,

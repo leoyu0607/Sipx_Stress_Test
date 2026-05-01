@@ -32,6 +32,7 @@ impl SipRole {
 pub struct SipLogger {
     file:     Mutex<fs::File>,
     pub path: PathBuf,
+    #[allow(dead_code)]
     role:     SipRole,
 }
 
@@ -158,18 +159,18 @@ impl SipLogger {
         let mut year   = 1970u32;
         let mut remaining = days;
         loop {
-            let days_in_year = if Self::is_leap(year) { 366 } else { 365 };
+            let days_in_year: u64 = if Self::is_leap(year) { 366 } else { 365 };
             if remaining < days_in_year {
                 break;
             }
             remaining -= days_in_year;
             year += 1;
         }
-        let months = [31u32, if Self::is_leap(year) { 29 } else { 28 },
+        let months = [31u64, if Self::is_leap(year) { 29 } else { 28 },
                       31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
         let mut month = 1u32;
-        for days_in_month in &months {
-            if remaining < *days_in_month {
+        for &days_in_month in &months {
+            if remaining < days_in_month {
                 break;
             }
             remaining -= days_in_month;
