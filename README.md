@@ -35,7 +35,8 @@
 | **聲音品質分析** | MOS 估算（ITU-T E-Model G.107）、掉包率、Jitter（RFC 3550） |
 | **總通數上限** | 民眾模式可設定 `--max-calls N`，達上限後自動停止（不依時長） |
 | **即時計數** | 儀表板同步顯示成功通數、失敗通數、佇列通數、Error Rate |
-| **HTML 報告** | 含環形指標圖、延遲分位數長條圖、RTP 品質區塊，可離線檢視 |
+| **HTML 報告** | 含環形指標圖、延遲分位數長條圖、RTP 品質區塊，可離線檢視；GUI 與 CLI 均支援 |
+| **GUI 匯出** | TitleBar 一鍵匯出 JSON / CSV / **HTML** 三種格式 |
 | **SIP Log** | 每次壓測自動產生帶時間戳記的完整 SIP 訊息 log |
 | **靜態編譯** | cargo-zigbuild 交叉編譯，無需 Docker，支援 Linux / Windows / macOS |
 | **多輸出格式** | Table / JSON / CSV，可 pipe 給其他工具 |
@@ -121,7 +122,7 @@ sipress/
 執行 `sipress-gui-*-portable.exe` 或安裝後開啟，可看到：
 
 - **左側 Sidebar**：填寫伺服器位址、CPS、並發數、**總通數上限**、持續時間（**0 = 不限時間**）、音檔路徑
-- **頂部 TitleBar**：顯示狀態、進度條，▶ Start / ■ Stop 按鈕
+- **頂部 TitleBar**：顯示狀態、進度條，▶ Start / ■ Stop 按鈕，及 **↓ JSON / ↓ CSV / ↓ HTML** 匯出按鈕（HTML 需測試完成後才啟用）
 - **中間 MetricStrip**：即時顯示 CPS、CONCUR、**SUCCESS（成功通數）**、**FAILED（失敗通數）**、**QUEUED（佇列通數）**、ASR、**ERR%（Error Rate）**、PDD
 - **圖表區**：折線圖（CPS / ASR / CCR / ERR 趨勢）
 - **右側面板**：回應碼統計、RTP 品質（**MOS / 掉包率 / Jitter**）、SIP flow 時序
@@ -450,7 +451,7 @@ npm run tauri dev   # 開啟視窗，hot-reload 前端
 
 ### `gui/src-tauri/src/commands.rs`
 
-四個 Tauri command，前端透過 `invoke()` 呼叫：
+五個 Tauri command，前端透過 `invoke()` 呼叫：
 
 | Command | 說明 |
 |---------|------|
@@ -458,3 +459,4 @@ npm run tauri dev   # 開啟視窗，hot-reload 前端
 | `stop_test()` | 手動停止 |
 | `get_snapshot()` | 取得即時 `StatsSnapshot`（前端每秒輪詢） |
 | `get_report()` | 取得最終 `FinalReport`（壓測完成後） |
+| `get_html_report(server_addr, timestamp)` | 產生 HTML 報告字串（前端下載為 `.html` 檔）；`server_addr` 會顯示在報告標頭 |

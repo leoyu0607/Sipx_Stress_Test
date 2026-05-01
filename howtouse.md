@@ -171,10 +171,15 @@ chmod +x sipress-gui-linux-x86_64-portable.AppImage
 
 ### 匯出報告
 
+測試完成後，TitleBar 右側的三個匯出按鈕均可點擊：
+
 | 按鈕 | 格式 | 用途 |
 |------|------|------|
 | ↓ JSON | `sipress_<時間戳>.json` | CI/CD 整合、程式讀取 |
 | ↓ CSV | `sipress_<時間戳>.csv` | Excel、Python 分析 |
+| ↓ HTML | `sipress_<時間戳>.html` | 視覺化報告（含環形圖、延遲長條圖、RTP 品質），可用瀏覽器離線開啟 |
+
+> **注意**：`↓ HTML` 按鈕在測試**執行中**或**尚未開始**時為灰色（disabled），需等測試完成或手動停止後才能使用。
 
 ---
 

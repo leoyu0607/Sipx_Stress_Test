@@ -633,16 +633,21 @@ MOS = 1 + 0.035R + R(R-60)(100-R) × 7×10⁻⁶
 
 ### HTML 報告（html_reporter.rs）
 
-內嵌所有 CSS 和 SVG，產生單一自包含 `.html` 檔案：
+內嵌所有 CSS 和 SVG，產生單一自包含 `.html` 檔案，可用瀏覽器離線開啟。
 
-```
-reports/YYYYMMDD_HHMMSS_report.html
+```rust
+// CLI 呼叫（儲存至 reports/ 目錄）
+HtmlReporter::save(&report, &args.report_dir, &ts, &args.server)?;
+
+// GUI 呼叫（回傳字串，由前端下載）
+HtmlReporter::render(&report, &timestamp, &server_addr)
 ```
 
-HTML 模板使用 Rust `format!` 巨集插值，無模板引擎依賴。包含：
-- SVG 環形圖（ASR）
-- SVG 長條圖（PDD 百分位數）
+`render()` 接受 `server_addr: &str` 並顯示在報告標頭，GUI 透過前端傳入（`config.value.server`），CLI 透過 `args.server` 傳入。HTML 模板使用 Rust `format!` 巨集插值，無模板引擎依賴。包含：
+- SVG 環形圖（ASR / CCR）
+- SVG 長條圖（PDD / Setup Time 百分位數）
 - RTP 品質區塊（有 RTP 時才顯示）
+- SIP 錯誤碼明細表（4xx / 5xx / 6xx / 逾時）
 
 ---
 
@@ -719,7 +724,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .manage(Arc::new(AppState::default()))   // ← 必須
         .invoke_handler(tauri::generate_handler![
-            start_test, stop_test, get_snapshot, get_report
+            start_test, stop_test, get_snapshot, get_report, get_html_report
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -891,6 +896,29 @@ clockTimer = setInterval(() => {
 
 當 `duration = 0` 時，前端時鐘持續計時但不觸發 `_finishTest()`。測試結束訊號由 `get_snapshot` 輪詢到 `null`（引擎結束後不再更新 snapshot）來判斷，或使用者點擊 Stop 按鈕。
 
+### HTML 報告匯出（exportHtml）
+
+```typescript
+async function exportHtml() {
+    const ts   = /* YYYYMMDD_HHMMSS */
+    const html = await invoke<string>('get_html_report', {
+        serverAddr: config.value.server,  // 顯示在報告標頭
+        timestamp:  ts,
+    })
+    // 與 JSON/CSV 相同的下載流程
+    const blob = new Blob([html], { type: 'text/html' })
+    const a = document.createElement('a')
+    a.href = URL.createObjectURL(blob)
+    a.download = `sipress_${ts}.html`
+    a.click()
+}
+```
+
+**設計選擇**：HTML 由 Rust 產生字串後傳回前端下載，而非在 Rust 端寫入磁碟並開啟。原因：
+1. 不需要 Rust 端的檔案系統路徑 dialog（Tauri 的 blocking save dialog 不適合 async context）
+2. 與 JSON/CSV 匯出行為一致，前端統一管理下載邏輯
+3. 前端傳入 `timestamp` 確保 Rust 不需要依賴 `chrono` crate
+
 ---
 
 ## 18. gui — Vue 元件樹
@@ -898,7 +926,7 @@ clockTimer = setInterval(() => {
 ```
 App.vue
 └── MainLayout.vue
-    ├── TitleBar.vue          進度條 + Start/Stop 按鈕
+    ├── TitleBar.vue          進度條 + Start/Stop 按鈕 + ↓ JSON / ↓ CSV / ↓ HTML 匯出
     ├── MetricStrip.vue       8 欄即時指標（CPS/CONCUR/SUCCESS/FAILED/QUEUED/ASR/ERR%/PDD）
     └── ContentArea.vue
         ├── Sidebar.vue       左側設定面板
