@@ -41,3 +41,4 @@ cli/target/
 gui/node_modules/
 core/target/
 gui/src-tauri/target/
+dist/
