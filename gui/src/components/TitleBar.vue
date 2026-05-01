@@ -1,12 +1,18 @@
 <script setup lang="ts">
 import { computed, inject, ref } from 'vue'
+import { getCurrentWindow } from '@tauri-apps/api/window'
 import { useTestStore } from '../stores/testStore'
 
 const store = useTestStore()
+const appWindow = getCurrentWindow()
 
 // Theme (provided by App.vue)
 const isDark      = inject<ReturnType<typeof ref<boolean>>>('isDark')!
 const toggleTheme = inject<() => void>('toggleTheme')!
+
+async function closeWindow()    { await appWindow.close() }
+async function minimizeWindow() { await appWindow.minimize() }
+async function maximizeWindow() { await appWindow.toggleMaximize() }
 
 const timerDisplay = computed(() => {
   const s   = store.elapsedSec
@@ -33,9 +39,9 @@ function toggleTest() {
 
     <!-- Window controls -->
     <div class="wc-group">
-      <div class="wc wc-close"></div>
-      <div class="wc wc-min"></div>
-      <div class="wc wc-max"></div>
+      <div class="wc wc-close"  @click="closeWindow"></div>
+      <div class="wc wc-min"    @click="minimizeWindow"></div>
+      <div class="wc wc-max"    @click="maximizeWindow"></div>
     </div>
 
     <div class="logo">sip<em>ress</em></div>
