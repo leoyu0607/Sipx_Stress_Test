@@ -11,16 +11,21 @@ crate-type  = ["cdylib", "rlib"]
 name = "sipress-gui"
 path = "src/main.rs"
 
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
 [dependencies]
-sipress-core = { path = "../../core" }
-tauri        = { version = "2", features = ["protocol-asset"] }
-tokio        = { workspace = true }
-anyhow       = { workspace = true }
-serde        = { workspace = true }
-serde_json   = { workspace = true }
-tracing      = { workspace = true }
-tracing-subscriber = "0.3"
+sipress-core       = { path = "../../core" }
+tauri              = { version = "2" }
+tauri-plugin-dialog  = "2"
+tauri-plugin-opener  = "2"
+tokio              = { workspace = true }
+anyhow             = { workspace = true }
+serde              = { workspace = true }
+serde_json         = { workspace = true }
+tracing            = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [features]
 default         = ["custom-protocol"]
-custom-protocol = ["tauri/custom-protocol"]
+custom-protocol = ["tauri/custom-protocol", "tauri/protocol-asset"]

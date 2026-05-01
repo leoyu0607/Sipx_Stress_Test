@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, provide, watch } from 'vue'
+import { ref, provide } from 'vue'
 import TitleBar    from './components/TitleBar.vue'
 import Sidebar     from './components/Sidebar.vue'
 import MetricStrip from './components/MetricStrip.vue'

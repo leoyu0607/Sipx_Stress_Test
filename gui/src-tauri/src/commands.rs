@@ -77,7 +77,9 @@ pub async fn start_test(
 pub async fn stop_test(
     state: State<'_, Arc<AppState>>,
 ) -> Result<String, String> {
-    if let Some(tx) = state.stop_tx.lock().unwrap().take() {
+    // Take the sender out BEFORE any await so MutexGuard is not held across threads
+    let tx = state.stop_tx.lock().unwrap().take();
+    if let Some(tx) = tx {
         let _ = tx.send(()).await;
         Ok("stopped".to_string())
     } else {
