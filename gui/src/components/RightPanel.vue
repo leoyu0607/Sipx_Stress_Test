@@ -1,4 +1,14 @@
 <script setup lang="ts">
+/**
+ * RightPanel.vue
+ *
+ * 修正 / 新增：
+ * 1. 新增「RTP 聲音品質」區塊（MOS / 掉包率 / Jitter / 封包統計）
+ *    對應 README §RTP 聲音品質指標 與 HTML 報告 §RTP 聲音品質區塊
+ * 2. MOS 顏色依 README 標準：≥4.0 優（accent）/ ≥3.0 普通（warn）/ <2.5 差（danger）
+ * 3. 掉包率顏色：<1% 優 / <3% 普通 / ≥3% 差（依電話品質建議）
+ * 4. Jitter 顏色：<30ms 優 / <60ms 普通 / ≥60ms 差
+ */
 import { computed } from 'vue'
 import { useTestStore } from '../stores/testStore'
 
@@ -9,21 +19,20 @@ const stateMax = computed(() =>
 )
 
 const stateList = computed(() => [
-  { key: 'invite',  label: 'INVITE',  color: 'var(--blue)',   val: store.callStates.invite },
-  { key: 'trying',  label: '100 Try', color: 'var(--text1)',  val: store.callStates.trying },
-  { key: 'ringing', label: '180 Ring',color: 'var(--warn)',   val: store.callStates.ringing },
-  { key: 'ok',      label: '200 OK',  color: 'var(--accent)', val: store.callStates.ok },
-  { key: 'ack',     label: 'ACK',     color: 'var(--accent)', val: store.callStates.ack },
-  { key: 'bye',     label: 'BYE',     color: 'var(--text2)',  val: store.callStates.bye },
-  { key: 'error',   label: 'Error',   color: 'var(--danger)', val: store.callStates.error },
+  { key: 'invite',  label: 'INVITE',   color: 'var(--blue)',   val: store.callStates.invite },
+  { key: 'trying',  label: '100 Try',  color: 'var(--text1)',  val: store.callStates.trying },
+  { key: 'ringing', label: '180 Ring', color: 'var(--warn)',   val: store.callStates.ringing },
+  { key: 'ok',      label: '200 OK',   color: 'var(--accent)', val: store.callStates.ok },
+  { key: 'ack',     label: 'ACK',      color: 'var(--accent)', val: store.callStates.ack },
+  { key: 'bye',     label: 'BYE',      color: 'var(--text2)',  val: store.callStates.bye },
+  { key: 'error',   label: 'Error',    color: 'var(--danger)', val: store.callStates.error },
 ])
 
 const respList = computed(() =>
   Object.entries(store.respCodes)
     .filter(([, v]) => v > 0)
     .map(([code, cnt]) => ({
-      code,
-      cnt,
+      code, cnt,
       color: code.startsWith('1') ? 'var(--text1)'
            : code.startsWith('2') ? 'var(--accent)'
            : 'var(--danger)',
@@ -31,20 +40,53 @@ const respList = computed(() =>
 )
 
 const flowSteps = computed(() => [
-  { dir: '→', label: 'INVITE',     color: 'var(--blue)',   time: store.flowTimes.invite, note: '' },
-  { dir: '←', label: '100 Trying', color: 'var(--text1)',  time: store.flowTimes.trying, note: '' },
-  { dir: '←', label: '180 Ringing',color: 'var(--warn)',   time: store.flowTimes.ringing, note: 'PDD start' },
-  { dir: '←', label: '200 OK',     color: 'var(--accent)', time: store.flowTimes.ok, note: 'PDD end' },
-  { dir: '→', label: 'ACK',        color: 'var(--accent)', time: store.flowTimes.ack, note: '' },
-  { dir: '→', label: 'BYE',        color: 'var(--text1)',  time: store.flowTimes.bye, note: 'ACD end' },
-  { dir: '←', label: '200 OK',     color: 'var(--text2)',  time: store.flowTimes.done, note: '' },
+  { dir: '→', label: 'INVITE',      color: 'var(--blue)',   time: store.flowTimes.invite,  note: '' },
+  { dir: '←', label: '100 Trying',  color: 'var(--text1)',  time: store.flowTimes.trying,  note: '' },
+  { dir: '←', label: '180 Ringing', color: 'var(--warn)',   time: store.flowTimes.ringing, note: 'PDD start' },
+  { dir: '←', label: '200 OK',      color: 'var(--accent)', time: store.flowTimes.ok,      note: 'PDD end' },
+  { dir: '→', label: 'ACK',         color: 'var(--accent)', time: store.flowTimes.ack,     note: '' },
+  { dir: '→', label: 'BYE',         color: 'var(--text1)',  time: store.flowTimes.bye,     note: 'ACD end' },
+  { dir: '←', label: '200 OK',      color: 'var(--text2)',  time: store.flowTimes.done,    note: '' },
 ])
+
+// ── RTP 指標顏色 ─────────────────────────────────────────────────
+
+const rtp = computed(() => store.rtpMetrics)
+
+const mosColor = computed(() => {
+  const m = rtp.value.mos
+  if (m >= 4.0) return 'var(--accent)'
+  if (m >= 3.0) return 'var(--warn)'
+  return 'var(--danger)'
+})
+
+const mosLabel = computed(() => {
+  const m = rtp.value.mos
+  if (m >= 4.0) return '優'
+  if (m >= 3.0) return '普通'
+  if (m > 0)    return '差'
+  return '—'
+})
+
+const lossColor = computed(() => {
+  const p = rtp.value.packetLoss
+  if (p < 1)  return 'var(--accent)'
+  if (p < 3)  return 'var(--warn)'
+  return 'var(--danger)'
+})
+
+const jitterColor = computed(() => {
+  const j = rtp.value.jitter
+  if (j < 30) return 'var(--accent)'
+  if (j < 60) return 'var(--warn)'
+  return 'var(--danger)'
+})
 </script>
 
 <template>
   <div class="right-panel">
 
-    <!-- Call States -->
+    <!-- ── Call States ─────────────────────────────────── -->
     <div class="rp-section">
       <div class="rp-title">call states</div>
       <div v-for="s in stateList" :key="s.key" class="state-row">
@@ -58,7 +100,81 @@ const flowSteps = computed(() => [
       </div>
     </div>
 
-    <!-- Response Codes -->
+    <!-- ── RTP 聲音品質 ──────────────────────────────────── -->
+    <div class="rp-section">
+      <div class="rp-title">
+        RTP 聲音品質
+        <span v-if="!rtp.enabled" class="rtp-off">未啟用</span>
+      </div>
+
+      <template v-if="rtp.enabled">
+        <!-- MOS -->
+        <div class="rtp-row">
+          <div class="rtp-key">MOS</div>
+          <div class="rtp-bar-wrap">
+            <div class="rtp-bar"
+                 :style="{ width: ((rtp.mos - 1) / 4 * 100) + '%', background: mosColor }">
+            </div>
+          </div>
+          <div class="rtp-val" :style="{ color: mosColor }">
+            {{ rtp.mos.toFixed(2) }}
+            <span class="rtp-tag">{{ mosLabel }}</span>
+          </div>
+        </div>
+
+        <!-- 掉包率 -->
+        <div class="rtp-row">
+          <div class="rtp-key">掉包</div>
+          <div class="rtp-bar-wrap">
+            <div class="rtp-bar"
+                 :style="{ width: Math.min(rtp.packetLoss * 10, 100) + '%', background: lossColor }">
+            </div>
+          </div>
+          <div class="rtp-val" :style="{ color: lossColor }">
+            {{ rtp.packetLoss.toFixed(2) }}%
+          </div>
+        </div>
+
+        <!-- Jitter -->
+        <div class="rtp-row">
+          <div class="rtp-key">Jitter</div>
+          <div class="rtp-bar-wrap">
+            <div class="rtp-bar"
+                 :style="{ width: Math.min(rtp.jitter / 150 * 100, 100) + '%', background: jitterColor }">
+            </div>
+          </div>
+          <div class="rtp-val" :style="{ color: jitterColor }">
+            {{ rtp.jitter.toFixed(1) }}ms
+          </div>
+        </div>
+
+        <!-- 封包統計 -->
+        <div class="rtp-stats">
+          <div class="rtp-stat-item">
+            <span class="rtp-stat-key">Sent</span>
+            <span class="rtp-stat-val">{{ rtp.packetsSent.toLocaleString() }}</span>
+          </div>
+          <div class="rtp-stat-item">
+            <span class="rtp-stat-key">Recv</span>
+            <span class="rtp-stat-val">{{ rtp.packetsRecv.toLocaleString() }}</span>
+          </div>
+          <div class="rtp-stat-item">
+            <span class="rtp-stat-key">OOO</span>
+            <span class="rtp-stat-val" :style="{ color: rtp.outOfOrder > 0 ? 'var(--warn)' : 'var(--text1)' }">
+              {{ rtp.outOfOrder }}
+            </span>
+          </div>
+        </div>
+      </template>
+
+      <!-- RTP 未啟用提示 -->
+      <div v-else class="rtp-hint">
+        使用 <code>--rtp</code> 啟用<br>
+        可選 <code>--audio &lt;file&gt;</code> 指定音檔
+      </div>
+    </div>
+
+    <!-- ── Response Codes ──────────────────────────────── -->
     <div class="rp-section">
       <div class="rp-title">response codes</div>
       <div v-if="respList.length === 0" class="empty">—</div>
@@ -68,14 +184,14 @@ const flowSteps = computed(() => [
       </div>
     </div>
 
-    <!-- SIP Flow -->
+    <!-- ── SIP Flow ────────────────────────────────────── -->
     <div class="rp-section flow-section">
       <div class="rp-title">last call flow</div>
       <div v-for="(step, i) in flowSteps" :key="i" class="flow-item">
         <div class="flow-line">
           <div class="flow-dot" :style="{ background: step.color }"></div>
           <div class="flow-msg" :style="{ color: step.color }">
-            {{ step.dir === '→' ? '' : '' }}{{ step.label }} {{ step.dir }}
+            {{ step.label }} {{ step.dir }}
           </div>
           <div class="flow-time">{{ step.time }}</div>
         </div>
@@ -95,7 +211,7 @@ const flowSteps = computed(() => [
   display: flex;
   flex-direction: column;
   overflow-y: auto;
-  width: 200px;
+  width: 210px;
   flex-shrink: 0;
 }
 
@@ -112,9 +228,22 @@ const flowSteps = computed(() => [
   color: var(--text2);
   text-transform: uppercase;
   margin-bottom: 8px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 
-/* State bars */
+.rtp-off {
+  font-size: 9px;
+  color: var(--text2);
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  padding: 1px 5px;
+  border-radius: 3px;
+  text-transform: lowercase;
+}
+
+/* ── State bars ─────────────────────────── */
 .state-row {
   display: flex;
   align-items: center;
@@ -125,7 +254,7 @@ const flowSteps = computed(() => [
   font-family: var(--mono);
   font-size: 10px;
   color: var(--text1);
-  min-width: 48px;
+  min-width: 52px;
 }
 .state-track {
   flex: 1;
@@ -147,7 +276,82 @@ const flowSteps = computed(() => [
   text-align: right;
 }
 
-/* Resp codes */
+/* ── RTP 品質 ───────────────────────────── */
+.rtp-row {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-bottom: 6px;
+}
+.rtp-key {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--text1);
+  min-width: 36px;
+}
+.rtp-bar-wrap {
+  flex: 1;
+  height: 3px;
+  background: var(--bg3);
+  border-radius: 2px;
+  overflow: hidden;
+}
+.rtp-bar {
+  height: 100%;
+  border-radius: 2px;
+  transition: width 0.6s ease;
+}
+.rtp-val {
+  font-family: var(--mono);
+  font-size: 10px;
+  min-width: 52px;
+  text-align: right;
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  justify-content: flex-end;
+}
+.rtp-tag {
+  font-size: 9px;
+  opacity: 0.75;
+}
+
+.rtp-stats {
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
+}
+.rtp-stat-item {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.rtp-stat-key {
+  font-family: var(--mono);
+  font-size: 8px;
+  color: var(--text2);
+  text-transform: uppercase;
+}
+.rtp-stat-val {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--text1);
+}
+
+.rtp-hint {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--text2);
+  line-height: 1.7;
+}
+.rtp-hint code {
+  color: var(--accent);
+  background: rgba(0,229,192,0.08);
+  padding: 0 3px;
+  border-radius: 2px;
+}
+
+/* ── Resp codes ─────────────────────────── */
 .rcode-row {
   display: flex;
   justify-content: space-between;
@@ -170,7 +374,7 @@ const flowSteps = computed(() => [
   color: var(--text2);
 }
 
-/* SIP Flow */
+/* ── SIP Flow ───────────────────────────── */
 .flow-section { flex: 1; }
 .flow-item { position: relative; }
 .flow-line {

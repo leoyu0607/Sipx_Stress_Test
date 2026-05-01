@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { ref } from 'vue'
-import { open } from '@tauri-apps/plugin-dialog'
 import { useTestStore } from '../stores/testStore'
 import GenerateDialog from './GenerateDialog.vue'
 
@@ -26,14 +25,10 @@ async function copyCli() {
   setTimeout(() => (copied.value = false), 2000)
 }
 
+// Audio file picker (Tauri file dialog stub)
 async function pickAudioFile() {
-  const path = await open({
-    multiple: false,
-    filters: [{ name: 'Audio', extensions: ['wav', 'pcm', 'raw'] }],
-  })
-  if (path && typeof path === 'string') {
-    store.config.caller.audioFile = path
-  }
+  // TODO: replace with → const path = await open({ filters: [{ name:'Audio', extensions:['wav','mp3','pcm'] }] })
+  store.addLog('info', 'audio file picker — connect Tauri dialog in production')
 }
 
 // Account file upload
