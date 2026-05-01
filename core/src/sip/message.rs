@@ -17,8 +17,9 @@ impl SipMessage {
         branch:       &str,
         tag:          &str,
         transport:    &str,   // "UDP" or "TCP"
+        rtp_port:     u16,    // 本機 RTP port（寫入 SDP m= 行）
     ) -> String {
-        let sdp = Self::minimal_sdp(local_addr);
+        let sdp = Self::minimal_sdp(local_addr, rtp_port);
         let sdp_len = sdp.len();
 
         format!(
@@ -164,9 +165,8 @@ impl SipMessage {
         )
     }
 
-    /// 最小 SDP（僅供壓測，不實際傳 RTP）
-    fn minimal_sdp(local_ip: &str) -> String {
-        // 取出純 IP（去掉 port）
+    /// 最小 SDP
+    fn minimal_sdp(local_ip: &str, rtp_port: u16) -> String {
         let ip = local_ip.split(':').next().unwrap_or(local_ip);
         format!(
             "v=0\r\n\
@@ -174,11 +174,12 @@ impl SipMessage {
              s=sipress\r\n\
              c=IN IP4 {ip}\r\n\
              t=0 0\r\n\
-             m=audio 49152 RTP/AVP 0 8\r\n\
+             m=audio {port} RTP/AVP 0 8\r\n\
              a=rtpmap:0 PCMU/8000\r\n\
              a=rtpmap:8 PCMA/8000\r\n\
              a=sendrecv\r\n",
             ip = ip,
+            port = rtp_port,
         )
     }
 
@@ -233,6 +234,27 @@ impl SipResponse {
             if line.to_lowercase().starts_with("cseq:") {
                 let val = line[5..].trim();
                 return val.split_whitespace().nth(1).map(|s| s.to_uppercase());
+            }
+        }
+        None
+    }
+
+    /// 從 200 OK 的 SDP body 中解析對端 RTP port
+    /// 格式：m=audio <port> RTP/AVP <fmt...>
+    pub fn sdp_rtp_port(raw: &str) -> Option<u16> {
+        // 找到 SIP header 與 SDP body 的分界（空行）
+        let body_start = raw.find("\r\n\r\n").map(|i| i + 4)
+            .or_else(|| raw.find("\n\n").map(|i| i + 2))?;
+        let body = &raw[body_start..];
+        for line in body.lines() {
+            // m=audio PORT proto fmt  或  m=video PORT ...（取第一個 m= 行）
+            if line.starts_with("m=") {
+                let parts: Vec<&str> = line.splitn(4, ' ').collect();
+                if parts.len() >= 2 {
+                    if let Ok(port) = parts[1].parse::<u16>() {
+                        return Some(port);
+                    }
+                }
             }
         }
         None

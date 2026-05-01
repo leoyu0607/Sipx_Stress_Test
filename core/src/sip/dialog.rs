@@ -21,6 +21,9 @@ pub struct Dialog {
 
     // 目標號碼（記錄用）
     pub callee: String,
+
+    // 本機 RTP port（INVITE 前預分配，用於 SDP 與 RTP session）
+    pub local_rtp_port: u16,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -46,7 +49,13 @@ pub enum DialogState {
 }
 
 impl Dialog {
-    pub fn new(call_id: String, from_tag: String, branch: String, callee: String) -> Self {
+    pub fn new(
+        call_id: String,
+        from_tag: String,
+        branch: String,
+        callee: String,
+        local_rtp_port: u16,
+    ) -> Self {
         Self {
             call_id,
             from_tag,
@@ -60,6 +69,7 @@ impl Dialog {
             bye_sent_at:  None,
             ended_at:     None,
             callee,
+            local_rtp_port,
         }
     }
 

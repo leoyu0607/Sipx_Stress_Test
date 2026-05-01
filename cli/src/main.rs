@@ -9,7 +9,6 @@ use sipress_core::{
     engine::{Engine, ProgressCallback},
     html_reporter::HtmlReporter,
     reporter::{OutputFormat, Reporter},
-    sip_logger::SipLogger,
     stats::StatsSnapshot,
 };
 use std::{
@@ -66,9 +65,9 @@ async fn main() -> Result<()> {
         // on_progress callback → 更新 TUI state
         let on_progress: ProgressCallback = Arc::new(move |snap: StatsSnapshot, progress: f64| {
             let mut st = tui_state_cb.lock().unwrap();
+            st.elapsed_secs = progress * st.target_duration as f64;
             st.snapshot     = snap;
             st.progress     = progress;
-            st.elapsed_secs = progress * tui_state_cb.lock().unwrap().target_duration as f64;
         });
 
         // 啟動引擎

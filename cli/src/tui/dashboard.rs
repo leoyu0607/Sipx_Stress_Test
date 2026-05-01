@@ -77,7 +77,7 @@ pub async fn run_tui(
 }
 
 fn draw(f: &mut Frame, st: &TuiState) {
-    let area = f.area();
+    let area = f.size();
 
     // 垂直切分：標題 / 進度條 / 主要指標 / 延遲表
     let chunks = Layout::default()
@@ -135,10 +135,15 @@ fn draw_progress(f: &mut Frame, area: Rect, st: &TuiState) {
 fn draw_stats(f: &mut Frame, area: Rect, st: &TuiState) {
     let s = &st.snapshot;
 
+    // 先儲存 String，避免臨時值在 Row::new 後立即丟棄
+    let r0 = [fmt_u64(s.calls_initiated), String::new(), String::new(), String::from("接通率 (ASR)"), fmt_pct(s.asr)];
+    let r1 = [fmt_u64(s.calls_answered),  String::new(), String::new(), String::from("失敗"),         fmt_u64(s.calls_failed)];
+    let r2 = [fmt_u64(s.calls_completed), String::new(), String::new(), String::from("逾時"),         fmt_u64(s.calls_timeout)];
+
     let rows = vec![
-        Row::new(vec!["發起", &fmt_u64(s.calls_initiated), "", "接通率 (ASR)", &fmt_pct(s.asr)]),
-        Row::new(vec!["接通", &fmt_u64(s.calls_answered),  "", "失敗",         &fmt_u64(s.calls_failed)]),
-        Row::new(vec!["完成", &fmt_u64(s.calls_completed), "", "逾時",         &fmt_u64(s.calls_timeout)]),
+        Row::new(["發起",  r0[0].as_str(), "", r0[3].as_str(), r0[4].as_str()]),
+        Row::new(["接通",  r1[0].as_str(), "", r1[3].as_str(), r1[4].as_str()]),
+        Row::new(["完成",  r2[0].as_str(), "", r2[3].as_str(), r2[4].as_str()]),
     ];
 
     let widths = [

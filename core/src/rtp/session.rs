@@ -29,12 +29,14 @@ pub struct RtpSessionConfig {
     pub base_port:   u16,
     /// 本機 IP
     pub local_ip:    String,
-    /// 遠端 RTP 地址（從 SDP 解析，或用 SIP server IP + 預設 port）
+    /// 遠端 RTP 地址（從 SDP 解析，格式 "ip:port"）
     pub remote_addr: String,
     /// 音檔路徑（None = 靜音）
     pub audio_file:  Option<std::path::PathBuf>,
     /// SSRC（None = 隨機）
     pub ssrc:        Option<u32>,
+    /// 預先分配的本機 RTP port（Some = 跳過動態分配，直接綁定此 port）
+    pub local_port:  Option<u16>,
 }
 
 /// 單通通話的 RTP session handle
@@ -50,8 +52,11 @@ impl RtpSession {
         config: RtpSessionConfig,
         port_counter: Arc<Mutex<u16>>,
     ) -> Result<Self> {
-        // ── 動態分配 RTP port ──
-        let local_port = Self::allocate_port(&port_counter, &config.local_ip).await?;
+        // 使用預分配 port，或動態從 port_counter 找可用 port
+        let local_port = match config.local_port {
+            Some(p) => p,
+            None    => Self::allocate_port(&port_counter, &config.local_ip).await?,
+        };
 
         let bind_addr  = format!("{}:{}", config.local_ip, local_port);
         let socket     = UdpSocket::bind(&bind_addr)
@@ -166,20 +171,20 @@ impl RtpSession {
 
     // ── Port 分配 ────────────────────────────────────────────────
 
-    /// 從 base_port 開始，找到可用的 even port
-    async fn allocate_port(
+    /// 從 counter 指向的 port 開始，找到可用的偶數 port 並推進計數器
+    /// 設為 pub 以供 engine 在送 INVITE 前預分配
+    pub async fn allocate_port(
         counter:  &Arc<Mutex<u16>>,
         local_ip: &str,
     ) -> Result<u16> {
         let mut guard = counter.lock().await;
         let start = *guard;
-        // 嘗試最多 500 個 port
-        for offset in (0u16..1000).step_by(2) {
+        // 嘗試最多 2000 個 port（對應 1000 通並發通話）
+        for offset in (0u16..4000).step_by(2) {
             let port = start.wrapping_add(offset);
             if port < 1024 { continue; }
             let addr = format!("{}:{}", local_ip, port);
             if UdpSocket::bind(&addr).await.is_ok() {
-                // 下次從這個 port + 2 開始
                 *guard = port.wrapping_add(2);
                 return Ok(port);
             }
