@@ -20,8 +20,7 @@
 |------|--------------|------------|
 | Windows x64 | `sipress-gui-windows-x86_64-installer.msi` 或 `*-setup.exe` | `sipress-gui-windows-x86_64-portable.exe` |
 | Linux x64 | `sipress-gui-linux-x86_64-installer.deb` | `sipress-gui-linux-x86_64-portable.AppImage` |
-| macOS x64 | `sipress-gui-macos-x86_64-installer.dmg` | `sipress-gui-macos-x86_64-portable` |
-| macOS ARM | `sipress-gui-macos-arm64-installer.dmg` | `sipress-gui-macos-arm64-portable` |
+| macOS ARM64 | `sipress-gui-macos-arm64-installer.dmg` | `sipress-gui-macos-arm64-portable` |
 
 ### 安裝版 vs 攜帶版差異
 

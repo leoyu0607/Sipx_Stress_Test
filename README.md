@@ -53,9 +53,12 @@
 | Windows | `sipress-gui-windows-x86_64-installer.msi` | `sipress-gui-windows-x86_64-portable.exe` |
 | Windows | `sipress-gui-windows-x86_64-setup.exe`（NSIS） | — |
 | Linux | `sipress-gui-linux-x86_64-installer.deb` | `sipress-gui-linux-x86_64-portable.AppImage` |
-| macOS | `sipress-gui-macos-arm64-installer.dmg` | `sipress-gui-macos-arm64-portable` |
+| macOS ARM | `sipress-gui-macos-arm64-installer.dmg` | `sipress-gui-macos-arm64-portable` |
 
-> **CLI 執行檔**（無 GUI）：`sipress-windows-x86_64-native.exe` / `sipress-linux-x86_64` / `sipress-macos-arm64`
+> **CLI 執行檔**（無 GUI）：
+> - Windows：`sipress-windows-x86_64-native.exe`（MSVC）或 `sipress-windows-x86_64.exe`（GNU zigbuild）
+> - Linux：`sipress-linux-x86_64`
+> - macOS：`sipress-macos-arm64`
 
 ### 自行建置
 
@@ -379,18 +382,29 @@ bash build.sh all          # 全部
 
 ### 所有輸出都在 `dist/`
 
+> 不同平台執行 `all` 產生的檔案不同：GUI bundle 只會在當前平台建置，CLI cross-compile 產出固定。
+
 ```
 dist/
-├── sipress-gui-windows-x86_64-installer.msi   ← GUI Windows 安裝版
-├── sipress-gui-windows-x86_64-setup.exe       ← GUI Windows 安裝版（NSIS）
-├── sipress-gui-windows-x86_64-portable.exe    ← GUI Windows 免安裝版
-├── sipress-gui-linux-x86_64-installer.deb     ← GUI Linux 安裝版
-├── sipress-gui-linux-x86_64-portable.AppImage ← GUI Linux 免安裝版
-├── sipress-gui-macos-arm64-installer.dmg      ← GUI macOS 安裝版
-├── sipress-windows-x86_64-native.exe          ← CLI Windows
-├── sipress-linux-x86_64                       ← CLI Linux x86_64
-├── sipress-linux-arm64                        ← CLI Linux ARM64
-└── sipress-macos-arm64                        ← CLI macOS ARM64
+│
+│  ── GUI（建置平台決定） ──
+├── sipress-gui-windows-x86_64-installer.msi    ← GUI Windows 安裝版（Windows 建置）
+├── sipress-gui-windows-x86_64-setup.exe        ← GUI Windows 安裝版 NSIS（Windows 建置）
+├── sipress-gui-windows-x86_64-portable.exe     ← GUI Windows 免安裝版（Windows 建置）
+├── sipress-gui-linux-x86_64-installer.deb      ← GUI Linux 安裝版（Linux 建置）
+├── sipress-gui-linux-x86_64-portable.AppImage  ← GUI Linux 免安裝版（Linux 建置）
+├── sipress-gui-macos-arm64-installer.dmg       ← GUI macOS 安裝版（macOS 建置）
+├── sipress-gui-macos-arm64-portable            ← GUI macOS 免安裝版（macOS 建置）
+│
+│  ── CLI（zigbuild 交叉編譯，任何平台皆可產生） ──
+├── sipress-linux-x86_64                        ← CLI Linux x86_64 靜態二進位
+├── sipress-linux-arm64                         ← CLI Linux ARM64 靜態二進位
+├── sipress-windows-x86_64.exe                  ← CLI Windows x86_64（GNU zigbuild）
+│
+│  ── CLI（native，建置平台決定） ──
+├── sipress-windows-x86_64-native.exe           ← CLI Windows MSVC（Windows 建置）
+├── sipress-macos-arm64                         ← CLI macOS ARM64（macOS 建置）
+└── sipress-linux-x86_64                        ← CLI Linux x86_64（Linux 建置，與 zigbuild 同名）
 ```
 
 ### 僅建置 CLI

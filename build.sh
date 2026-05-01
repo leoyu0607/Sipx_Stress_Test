@@ -65,10 +65,27 @@ build_native() {
     info "Native CLI build ..."
     cargo build --manifest-path cli/Cargo.toml --$PROFILE -q
     local src="target/$PROFILE/$BIN"
-    local out_name="$BIN-$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m)"
+    local out_name
+
+    # Normalize OS/arch names: darwin→macos, aarch64→arm64
+    local os_tag arch_tag
+    case "$(uname -s)" in
+        Darwin) os_tag="macos" ;;
+        Linux)  os_tag="linux" ;;
+        *)      os_tag="$(uname -s | tr '[:upper:]' '[:lower:]')" ;;
+    esac
+    case "$(uname -m)" in
+        x86_64)        arch_tag="x86_64" ;;
+        arm64|aarch64) arch_tag="arm64"  ;;
+        *)             arch_tag="$(uname -m)" ;;
+    esac
+
     if [[ "$OSTYPE" == "msys" || "$OSTYPE" == "cygwin" || "$OSTYPE" == "win32" ]]; then
         src="${src}.exe"; out_name="${BIN}-windows-x86_64-native.exe"
+    else
+        out_name="${BIN}-${os_tag}-${arch_tag}"
     fi
+
     cp "$src" "$OUT/$out_name"
     local size; size=$(du -sh "$OUT/$out_name" | cut -f1)
     ok "$OUT/$out_name  ($size)"
