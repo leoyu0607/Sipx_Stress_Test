@@ -35,6 +35,13 @@ function Ensure-Zigbuild {
     }
 }
 
+function Add-RustTarget ([string]$t) {
+    $old = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    rustup target add $t | Out-Null
+    $ErrorActionPreference = $old
+}
+
 # ── Build functions ────────────────────────────────────────────────
 function Build-CrossTarget ([string]$rustTarget, [string]$outName) {
     Info "Cross-compiling $rustTarget ..."
@@ -70,17 +77,17 @@ Info "Target: $Target"
 switch ($Target.ToLower()) {
     "linux-x86" {
         Ensure-Zig; Ensure-Zigbuild
-        rustup target add x86_64-unknown-linux-musl --quiet
+        Add-RustTarget "x86_64-unknown-linux-musl"
         Build-CrossTarget "x86_64-unknown-linux-musl" "$BIN-linux-x86_64"
     }
     "linux-arm64" {
         Ensure-Zig; Ensure-Zigbuild
-        rustup target add aarch64-unknown-linux-musl --quiet
+        Add-RustTarget "aarch64-unknown-linux-musl"
         Build-CrossTarget "aarch64-unknown-linux-musl" "$BIN-linux-arm64"
     }
     "windows" {
         Ensure-Zig; Ensure-Zigbuild
-        rustup target add x86_64-pc-windows-gnu --quiet
+        Add-RustTarget "x86_64-pc-windows-gnu"
         Build-CrossTarget "x86_64-pc-windows-gnu" "$BIN-windows-x86_64.exe"
     }
     "windows-native" {
@@ -88,20 +95,19 @@ switch ($Target.ToLower()) {
     }
     "macos-x86" {
         Ensure-Zig; Ensure-Zigbuild
-        rustup target add x86_64-apple-darwin --quiet
+        Add-RustTarget "x86_64-apple-darwin"
         Build-CrossTarget "x86_64-apple-darwin" "$BIN-macos-x86_64"
     }
     "macos-arm64" {
         Ensure-Zig; Ensure-Zigbuild
-        rustup target add aarch64-apple-darwin --quiet
+        Add-RustTarget "aarch64-apple-darwin"
         Build-CrossTarget "aarch64-apple-darwin" "$BIN-macos-arm64"
     }
     "all" {
         Ensure-Zig; Ensure-Zigbuild
-        # Ensure all cross-compile targets are installed
-        rustup target add x86_64-unknown-linux-musl  --quiet
-        rustup target add aarch64-unknown-linux-musl --quiet
-        rustup target add x86_64-pc-windows-gnu      --quiet
+        Add-RustTarget "x86_64-unknown-linux-musl"
+        Add-RustTarget "aarch64-unknown-linux-musl"
+        Add-RustTarget "x86_64-pc-windows-gnu"
         Build-CrossTarget "x86_64-unknown-linux-musl"  "$BIN-linux-x86_64"
         Build-CrossTarget "aarch64-unknown-linux-musl" "$BIN-linux-arm64"
         Build-CrossTarget "x86_64-pc-windows-gnu"      "$BIN-windows-x86_64.exe"
