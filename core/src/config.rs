@@ -75,6 +75,9 @@ pub struct Config {
 
     /// 是否啟用 RTP 傳送（false = 只做 SIP signaling）
     pub enable_rtp: bool,
+
+    /// 總通話上限（None = 不限，依 duration_secs 決定結束）
+    pub max_total_calls: Option<u64>,
 }
 
 impl Default for Config {
@@ -96,6 +99,7 @@ impl Default for Config {
             rtp_base_port:        10000,
             audio_file:           None,
             enable_rtp:           false,
+            max_total_calls:      None,
         }
     }
 }

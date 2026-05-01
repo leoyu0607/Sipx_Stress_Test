@@ -1,5 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
+import { invoke } from '@tauri-apps/api/core'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -18,6 +19,7 @@ export interface CallerProfile {
   accessNumber: string
   concurrency: number
   cps: number
+  totalCalls: number   // 0 = unlimited
   enableAudio: boolean
   audioFile: string
 }
@@ -43,11 +45,14 @@ export interface TestConfig {
 export interface Metrics {
   cps: number
   concurrency: number
+  succeeded: number
+  failed: number
+  queued: number
   asr: number
   ccr: number
+  errorRate: number
   pdd: number
   acd: number
-  failed: number
 }
 
 export interface RtpMetrics {
@@ -78,21 +83,44 @@ export interface LogEntry {
 
 export type TestStatus = 'idle' | 'running' | 'done' | 'error'
 
+// Rust StatsSnapshot shape
+interface RustSnapshot {
+  calls_initiated:  number
+  calls_answered:   number
+  calls_completed:  number
+  calls_failed:     number
+  calls_timeout:    number
+  calls_concurrent: number
+  asr:              number
+  error_rate:       number
+}
+
+// Rust FinalReport shape (subset we use)
+interface RustReport {
+  calls_initiated: number
+  calls_answered:  number
+  calls_completed: number
+  calls_failed:    number
+  calls_timeout:   number
+  asr:             number
+  ccr:             number
+  actual_cps:      number
+  acd_secs:        number
+  pdd_p50_ms:      number
+  pdd_p95_ms:      number
+  mos:             number | null
+  loss_rate_pct:   number | null
+  jitter_ms:       number | null
+  rtp_sent:        number | null
+  rtp_recv:        number | null
+  rtp_out_of_order: number | null
+}
+
 // ── Constants ─────────────────────────────────────────────────────────────────
 const MAX_SERIES = 90
 const MAX_LOG    = 300
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
-function gauss(mean: number, sd: number): number {
-  let u = 0, v = 0
-  while (!u) u = Math.random()
-  while (!v) v = Math.random()
-  return mean + sd * Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v)
-}
-function clamp(v: number, lo: number, hi: number) { return Math.max(lo, Math.min(hi, v)) }
-function ri(a: number, b: number) { return Math.floor(Math.random() * (b - a + 1)) + a }
-function randId() { return Math.random().toString(16).slice(2, 10).toUpperCase() }
-function randIp() { return `10.${ri(0,255)}.${ri(0,255)}.${ri(1,254)}` }
 function uid()    { return Math.random().toString(36).slice(2, 8) }
 
 function nowTs() {
@@ -117,6 +145,7 @@ export const useTestStore = defineStore('test', () => {
       accessNumber: '4008001234',
       concurrency: 100,
       cps: 10,
+      totalCalls: 0,
       enableAudio: false,
       audioFile: '',
     },
@@ -129,18 +158,29 @@ export const useTestStore = defineStore('test', () => {
 
   const status      = ref<TestStatus>('idle')
   const elapsedSec  = ref(0)
-  const metrics     = ref<Metrics>({ cps:0, concurrency:0, asr:0, ccr:0, pdd:0, acd:0, failed:0 })
-  const series      = ref({ cps:[] as number[], conc:[] as number[], asr:[] as number[], ccr:[] as number[], pdd:[] as number[], fail:[] as number[], mos:[] as number[] })
+  const metrics     = ref<Metrics>({
+    cps: 0, concurrency: 0, succeeded: 0, failed: 0, queued: 0,
+    asr: 0, ccr: 0, errorRate: 0, pdd: 0, acd: 0,
+  })
+  const series      = ref({
+    cps:  [] as number[],
+    conc: [] as number[],
+    asr:  [] as number[],
+    ccr:  [] as number[],
+    pdd:  [] as number[],
+    fail: [] as number[],
+    mos:  [] as number[],
+  })
   const callStates  = ref<CallStates>({ invite:0, trying:0, ringing:0, ok:0, ack:0, bye:0, error:0 })
-  const rtpMetrics  = ref<RtpMetrics>({ enabled:false, mos:0, packetLoss:0, jitter:0, packetsSent:0, packetsRecv:0, outOfOrder:0 })
   const respCodes   = ref<Record<string, number>>({ '100':0,'180':0,'200':0,'486':0,'404':0,'503':0,'408':0 })
   const logs        = ref<LogEntry[]>([])
   const flowTimes   = ref({ invite:'—', trying:'—', ringing:'—', ok:'—', ack:'—', bye:'—', done:'—' })
+  const rtpMetrics  = ref<RtpMetrics>({ enabled:false, mos:0, packetLoss:0, jitter:0, packetsSent:0, packetsRecv:0, outOfOrder:0 })
   const accountImportError = ref('')
 
-  let simTimer:   ReturnType<typeof setInterval> | null = null
+  let pollTimer:  ReturnType<typeof setInterval> | null = null
   let clockTimer: ReturnType<typeof setInterval> | null = null
-  let tick = 0
+  let prevInitiated = 0
 
   // ── Computed ──────────────────────────────────────────────────────────────────
   const mosRating = computed(() => {
@@ -170,7 +210,8 @@ export const useTestStore = defineStore('test', () => {
     const tr = c.transport.toLowerCase()
     if (c.mode === 'caller') {
       const audio = c.caller.enableAudio && c.caller.audioFile ? ` --audio "${c.caller.audioFile}"` : ''
-      return `./sipress -s ${c.server} --mode caller --number ${c.caller.accessNumber} -c ${c.caller.concurrency} --cps ${c.caller.cps} --duration ${c.duration} --transport ${tr}${audio}`
+      const total = c.caller.totalCalls > 0 ? ` --max-calls ${c.caller.totalCalls}` : ''
+      return `./sipress -s ${c.server} --mode caller --number ${c.caller.accessNumber} -c ${c.caller.concurrency} --cps ${c.caller.cps} --duration ${c.duration} --transport ${tr}${total}${audio}`
     } else {
       return `./sipress -s ${c.server} --mode agent --accounts accounts.csv --duration ${c.duration} --transport ${tr}`
     }
@@ -193,6 +234,150 @@ export const useTestStore = defineStore('test', () => {
   function pushSeries(key: keyof typeof series.value, val: number) {
     series.value[key].push(val)
     if (series.value[key].length > MAX_SERIES) series.value[key].shift()
+  }
+
+  // ── Rust config builder ───────────────────────────────────────────────────────
+  function buildRustConfig() {
+    const c = config.value
+    const transportMap: Record<string, string> = { UDP: 'udp', TCP: 'tcp', TLS: 'tcp' }
+    return {
+      server_addr:          c.server,
+      local_addr:           c.localPort ? `0.0.0.0:${c.localPort}` : null,
+      local_domain:         null,
+      caller_number:        c.caller.accessNumber,
+      callee_prefix:        '2',
+      callee_range:         9999,
+      cps:                  c.caller.cps,
+      max_concurrent_calls: c.caller.concurrency,
+      max_total_calls:      c.caller.totalCalls > 0 ? c.caller.totalCalls : null,
+      duration_secs:        c.duration,
+      call_duration_secs:   30,
+      invite_timeout_secs:  8,
+      transport:            transportMap[c.transport] ?? 'udp',
+      logs_dir:             'logs',
+      rtp_base_port:        10000,
+      audio_file:           c.caller.enableAudio && c.caller.audioFile ? c.caller.audioFile : null,
+      enable_rtp:           c.caller.enableAudio && !!c.caller.audioFile,
+    }
+  }
+
+  // ── Snapshot → store ─────────────────────────────────────────────────────────
+  function applySnapshot(snap: RustSnapshot) {
+    const cps = Math.max(0, snap.calls_initiated - prevInitiated)
+    prevInitiated = snap.calls_initiated
+
+    metrics.value = {
+      cps,
+      concurrency: snap.calls_concurrent,
+      succeeded:   snap.calls_answered,
+      failed:      snap.calls_failed + snap.calls_timeout,
+      queued:      snap.calls_concurrent,
+      asr:         snap.asr,
+      ccr:         snap.calls_initiated > 0
+        ? snap.calls_completed / snap.calls_initiated * 100
+        : 0,
+      errorRate:   snap.error_rate,
+      pdd:         0,
+      acd:         0,
+    }
+
+    pushSeries('cps',  cps)
+    pushSeries('conc', snap.calls_concurrent)
+    pushSeries('asr',  snap.asr)
+    pushSeries('ccr',  metrics.value.ccr)
+    pushSeries('fail', snap.calls_failed + snap.calls_timeout)
+
+    if (snap.calls_failed + snap.calls_timeout > 0)
+      addLog('warn', `失敗 ${snap.calls_failed} 逾時 ${snap.calls_timeout}  發起 ${snap.calls_initiated}  ASR ${snap.asr.toFixed(1)}%`)
+  }
+
+  async function _tryFetchReport() {
+    try {
+      const report = await invoke<RustReport | null>('get_report')
+      if (!report) return
+      metrics.value = {
+        ...metrics.value,
+        cps:       report.actual_cps,
+        succeeded: report.calls_answered,
+        failed:    report.calls_failed + report.calls_timeout,
+        asr:       report.asr,
+        ccr:       report.ccr,
+        errorRate: report.calls_initiated > 0
+          ? (report.calls_failed + report.calls_timeout) / report.calls_initiated * 100
+          : 0,
+        pdd:       report.pdd_p50_ms,
+        acd:       report.acd_secs,
+      }
+      if (report.mos !== null) {
+        rtpMetrics.value = {
+          enabled:     true,
+          mos:         report.mos ?? 0,
+          packetLoss:  report.loss_rate_pct ?? 0,
+          jitter:      report.jitter_ms ?? 0,
+          packetsSent: report.rtp_sent ?? 0,
+          packetsRecv: report.rtp_recv ?? 0,
+          outOfOrder:  report.rtp_out_of_order ?? 0,
+        }
+        pushSeries('mos', report.mos ?? 0)
+      }
+      addLog('ok', `測試完成  發起 ${report.calls_initiated}  接通 ${report.calls_answered}  失敗 ${report.calls_failed + report.calls_timeout}  ASR ${report.asr.toFixed(1)}%  CPS ${report.actual_cps.toFixed(1)}`)
+    } catch (e) {
+      addLog('warn', `無法取得最終報告: ${e}`)
+    }
+  }
+
+  function _finishTest() {
+    if (pollTimer)  { clearInterval(pollTimer);  pollTimer  = null }
+    if (clockTimer) { clearInterval(clockTimer); clockTimer = null }
+    _tryFetchReport().then(() => { status.value = 'done' })
+  }
+
+  // ── Start / Stop ──────────────────────────────────────────────────────────────
+  async function startTest() {
+    if (status.value === 'running') return
+    status.value = 'running'
+    elapsedSec.value = 0
+    prevInitiated = 0
+    metrics.value  = { cps:0, concurrency:0, succeeded:0, failed:0, queued:0, asr:0, ccr:0, errorRate:0, pdd:0, acd:0 }
+    series.value   = { cps:[], conc:[], asr:[], ccr:[], pdd:[], fail:[], mos:[] }
+    respCodes.value = { '100':0,'180':0,'200':0,'486':0,'404':0,'503':0,'408':0 }
+    callStates.value = { invite:0, trying:0, ringing:0, ok:0, ack:0, bye:0, error:0 }
+    rtpMetrics.value = { enabled:false, mos:0, packetLoss:0, jitter:0, packetsSent:0, packetsRecv:0, outOfOrder:0 }
+
+    try {
+      await invoke('start_test', { config: buildRustConfig() })
+      addLog('ok',   `test started → ${config.value.server}  [${config.value.mode} mode]`)
+      addLog('info', `duration: ${config.value.duration}s  cps: ${config.value.caller.cps}  concur: ${config.value.caller.concurrency}${config.value.caller.totalCalls > 0 ? `  max-calls: ${config.value.caller.totalCalls}` : ''}`)
+    } catch (e) {
+      addLog('err', `啟動失敗: ${e}`)
+      status.value = 'error'
+      return
+    }
+
+    pollTimer = setInterval(async () => {
+      try {
+        const snap = await invoke<RustSnapshot | null>('get_snapshot')
+        if (snap) applySnapshot(snap)
+      } catch { /* ignore */ }
+    }, 1000)
+
+    clockTimer = setInterval(() => {
+      elapsedSec.value++
+      if (config.value.duration > 0 && elapsedSec.value >= config.value.duration) {
+        _finishTest()
+      }
+    }, 1000)
+  }
+
+  async function stopTest() {
+    if (pollTimer)  { clearInterval(pollTimer);  pollTimer  = null }
+    if (clockTimer) { clearInterval(clockTimer); clockTimer = null }
+    try {
+      await invoke('stop_test')
+    } catch { /* already stopped */ }
+    await _tryFetchReport()
+    status.value = 'done'
+    addLog('warn', `test stopped  elapsed: ${elapsedSec.value}s`)
   }
 
   // ── SIP Account Management ────────────────────────────────────────────────────
@@ -245,21 +430,16 @@ export const useTestStore = defineStore('test', () => {
 
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i]
-
-      // Skip header row if it looks like a CSV header
       if (i === 0 && /^(extension|ext|username|user)/i.test(line)) continue
 
       if (line.includes(',')) {
-        // CSV: extension,username,password[,domain]
         const p = line.split(',').map(s => s.trim())
         if (p.length < 3) { accountImportError.value = `Line ${i+1}: need extension,username,password`; continue }
         result.push({ id:uid(), extension:p[0], username:p[1], password:p[2], domain:p[3]||domain, status:'idle' })
       } else if (line.includes(':')) {
-        // user:pass[:domain]
         const p = line.split(':')
         result.push({ id:uid(), extension:p[0].trim(), username:p[0].trim(), password:p[1]?.trim()??'', domain:p[2]?.trim()||domain, status:'idle' })
       } else {
-        // space: ext user pass [domain]
         const p = line.split(/\s+/)
         if (p.length < 3) { accountImportError.value = `Line ${i+1}: unrecognized format`; continue }
         result.push({ id:uid(), extension:p[0], username:p[1], password:p[2], domain:p[3]||domain, status:'idle' })
@@ -277,133 +457,6 @@ export const useTestStore = defineStore('test', () => {
     }
   }
 
-  // ── Simulation ────────────────────────────────────────────────────────────────
-  function _simTick() {
-    const maxConc   = activeConcurrency.value
-    const targetCps = activeCps.value
-
-    const cps  = clamp(gauss(targetCps * 0.98, 0.7), 0, targetCps * 2)
-    const conc = Math.round(clamp(gauss(maxConc * 0.97, 5), 0, maxConc * 1.2))
-    const asr  = clamp(gauss(88, 3), 0, 100)
-    const ccr  = clamp(gauss(82, 4), 0, 100)
-    const pdd  = clamp(gauss(140, 28), 20, 800)
-    const acd  = clamp(gauss(config.value.mode === 'caller' ? 30 : 180, 10), 5, 600)
-    const fail = Math.random() < 0.06 ? ri(0, 3) : 0
-
-    metrics.value = {
-      cps: parseFloat(cps.toFixed(1)),
-      concurrency: conc,
-      asr: parseFloat(asr.toFixed(1)),
-      ccr: parseFloat(ccr.toFixed(1)),
-      pdd: parseFloat(pdd.toFixed(0)),
-      acd: parseFloat(acd.toFixed(1)),
-      failed: (metrics.value.failed ?? 0) + fail,
-    }
-
-    pushSeries('cps', cps); pushSeries('conc', conc)
-    pushSeries('asr', asr); pushSeries('ccr', ccr)
-    pushSeries('pdd', pdd); pushSeries('fail', fail)
-
-    if (config.value.caller.enableAudio && config.value.caller.audioFile) {
-      const mos = clamp(gauss(3.8, 0.3), 1, 5)
-      rtpMetrics.value = {
-        enabled: true,
-        mos: parseFloat(mos.toFixed(2)),
-        packetLoss: clamp(gauss(0.5, 0.4), 0, 20),
-        jitter: clamp(gauss(18, 8), 0, 150),
-        packetsSent: (rtpMetrics.value.packetsSent ?? 0) + Math.round(cps * 50),
-        packetsRecv: (rtpMetrics.value.packetsRecv ?? 0) + Math.round(cps * 49),
-        outOfOrder: rtpMetrics.value.outOfOrder + (Math.random() < 0.05 ? 1 : 0),
-      }
-      pushSeries('mos', mos)
-    }
-
-    callStates.value = {
-      invite:Math.round(conc*0.07), trying:Math.round(conc*0.05),
-      ringing:Math.round(conc*0.12), ok:Math.round(conc*0.63),
-      ack:Math.round(conc*0.04), bye:Math.round(conc*0.06), error:Math.round(conc*0.03),
-    }
-
-    respCodes.value['100'] += Math.round(cps)
-    respCodes.value['180'] += Math.round(cps * 0.88)
-    respCodes.value['200'] += Math.round(cps * (asr / 100))
-    if (Math.random() < 0.08) respCodes.value['486'] += ri(1,3)
-    if (Math.random() < 0.03) respCodes.value['404']++
-    if (Math.random() < 0.02) respCodes.value['503']++
-    if (Math.random() < 0.01) respCodes.value['408']++
-
-    if (config.value.mode === 'agent') {
-      config.value.agent.accounts.forEach(acc => {
-        if (acc.status === 'registering' && Math.random() < 0.3)
-          acc.status = Math.random() < 0.95 ? 'registered' : 'failed'
-      })
-    }
-
-    if (tick % 8 === 0) {
-      flowTimes.value = {
-        invite:'00:00', trying:`+${ri(2,15)}ms`, ringing:`+${ri(30,200)}ms`,
-        ok:`+${ri(50,350)}ms`, ack:`+${ri(1,5)}ms`, bye:`+${ri(5,60)*1000}ms`, done:`+${ri(1,10)}ms`,
-      }
-    }
-
-    const LOG_T: [LogEntry['level'], string][] = config.value.mode === 'caller'
-      ? [
-          ['ok',   `INVITE → ${config.value.caller.accessNumber}@${config.value.server}  Call-ID: ${randId()}`],
-          ['ok',   `200 OK ← sip:${randIp()}  PDD: ${pdd.toFixed(0)}ms`],
-          ['info', `180 Ringing ← PDD: ${pdd.toFixed(0)}ms`],
-          ['ok',   `BYE →  duration: ${ri(5,60)}s`],
-          ['warn', '486 Busy Here ← INVITE'],
-          ['err',  '503 Service Unavailable ← INVITE'],
-        ]
-      : [
-          ['ok',   `REGISTER ${config.value.agent.accounts[ri(0,Math.max(0,config.value.agent.accounts.length-1))]?.username??'agent'}@${config.value.agent.defaultDomain}`],
-          ['ok',   '200 OK ← REGISTER  Expires: 3600'],
-          ['info', `INVITE ← ${randIp()}  Call-ID: ${randId()}`],
-          ['ok',   '200 OK → INVITE  agent answered'],
-          ['warn', `REGISTER failed  401 Unauthorized  ext: ${1000+ri(0,20)}`],
-        ]
-
-    if (tick % 2 === 0) {
-      const [lv, msg] = LOG_T[ri(0, LOG_T.length - 1)]
-      addLog(lv, msg)
-    }
-    tick++
-  }
-
-  // ── Start / Stop ──────────────────────────────────────────────────────────────
-  function startTest() {
-    if (status.value === 'running') return
-    status.value = 'running'; elapsedSec.value = 0
-    metrics.value  = { cps:0, concurrency:0, asr:0, ccr:0, pdd:0, acd:0, failed:0 }
-    series.value   = { cps:[], conc:[], asr:[], ccr:[], pdd:[], fail:[], mos:[] }
-    rtpMetrics.value = { enabled:false, mos:0, packetLoss:0, jitter:0, packetsSent:0, packetsRecv:0, outOfOrder:0 }
-    respCodes.value= { '100':0,'180':0,'200':0,'486':0,'404':0,'503':0,'408':0 }
-    callStates.value = { invite:0, trying:0, ringing:0, ok:0, ack:0, bye:0, error:0 }
-    tick = 0
-
-    if (config.value.mode === 'agent') {
-      config.value.agent.accounts.forEach(a => { a.status = 'registering' })
-      addLog('info', `registering ${config.value.agent.accounts.length} SIP agents...`)
-    }
-    addLog('ok',   `test started → ${config.value.server}  [${config.value.mode} mode]`)
-    addLog('info', `duration: ${config.value.duration}s`)
-
-    simTimer   = setInterval(_simTick, 1000)
-    clockTimer = setInterval(() => {
-      elapsedSec.value++
-      if (elapsedSec.value >= config.value.duration) stopTest()
-    }, 1000)
-  }
-
-  function stopTest() {
-    if (simTimer)   { clearInterval(simTimer);   simTimer   = null }
-    if (clockTimer) { clearInterval(clockTimer); clockTimer = null }
-    status.value = 'done'
-    if (config.value.mode === 'agent')
-      config.value.agent.accounts.forEach(a => { a.status = 'idle' })
-    addLog('warn', `test stopped  elapsed: ${elapsedSec.value}s`)
-  }
-
   // ── Export ────────────────────────────────────────────────────────────────────
   function exportJson() {
     const blob = new Blob([JSON.stringify({ mode:config.value.mode, target:config.value.server, elapsed:elapsedSec.value, config:config.value, metrics:metrics.value, respCodes:respCodes.value, series:series.value }, null, 2)], { type:'application/json' })
@@ -412,9 +465,9 @@ export const useTestStore = defineStore('test', () => {
   }
 
   function exportCsv() {
-    const rows = [['tick','cps','conc','asr','pdd','fail']]
+    const rows = [['tick','cps','conc','asr','fail']]
     for (let i = 0; i < series.value.cps.length; i++)
-      rows.push([String(i), series.value.cps[i]?.toFixed(2)?? '0', String(series.value.conc[i]??0), series.value.asr[i]?.toFixed(2)?? '0', series.value.pdd[i]?.toFixed(0)?? '0', String(series.value.fail[i]??0)])
+      rows.push([String(i), series.value.cps[i]?.toFixed(2)?? '0', String(series.value.conc[i]??0), series.value.asr[i]?.toFixed(2)?? '0', String(series.value.fail[i]??0)])
     const blob = new Blob([rows.map(r => r.join(',')).join('\n')], { type:'text/csv' })
     const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = `sipress_${Date.now()}.csv`; a.click()
     addLog('ok', 'report exported → sipress.csv')

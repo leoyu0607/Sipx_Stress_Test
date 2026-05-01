@@ -33,6 +33,8 @@
 | **SIP 信令** | 完整 INVITE / 100 / 180 / 200 / ACK / BYE / CANCEL 流程（RFC 3261） |
 | **真實 RTP** | 每 20ms 傳送 G.711 PCMU 封包，支援 WAV 音檔循環播放 |
 | **聲音品質分析** | MOS 估算（ITU-T E-Model G.107）、掉包率、Jitter（RFC 3550） |
+| **總通數上限** | 民眾模式可設定 `--max-calls N`，達上限後自動停止（不依時長） |
+| **即時計數** | 儀表板同步顯示成功通數、失敗通數、佇列通數、Error Rate |
 | **HTML 報告** | 含環形指標圖、延遲分位數長條圖、RTP 品質區塊，可離線檢視 |
 | **SIP Log** | 每次壓測自動產生帶時間戳記的完整 SIP 訊息 log |
 | **靜態編譯** | cargo-zigbuild 交叉編譯，無需 Docker，支援 Linux / Windows / macOS |
@@ -115,11 +117,11 @@ sipress/
 
 執行 `sipress-gui-*-portable.exe` 或安裝後開啟，可看到：
 
-- **左側 Sidebar**：填寫伺服器位址、CPS、並發數、持續時間、音檔路徑
+- **左側 Sidebar**：填寫伺服器位址、CPS、並發數、**總通數上限**、持續時間、音檔路徑
 - **頂部 TitleBar**：顯示狀態、進度條，▶ Start / ■ Stop 按鈕
-- **中間 MetricStrip**：即時顯示 CPS、CONCUR、ASR、PDD、ACD、FAILED
-- **圖表區**：折線圖（CPS/ASR 趨勢）+ SIP 流程狀態圖
-- **右側面板**：回應碼統計、SIP flow 時序
+- **中間 MetricStrip**：即時顯示 CPS、CONCUR、**SUCCESS（成功通數）**、**FAILED（失敗通數）**、**QUEUED（佇列通數）**、ASR、**ERR%（Error Rate）**、PDD
+- **圖表區**：折線圖（CPS / ASR / CCR / ERR 趨勢）
+- **右側面板**：回應碼統計、RTP 品質（**MOS / 掉包率 / Jitter**）、SIP flow 時序
 - **底部 LogPanel**：即時 SIP 事件日誌（color-coded）
 
 > 詳細使用步驟請參閱 [howtouse.md](howtouse.md)
@@ -204,8 +206,13 @@ UAC (sipress)              UAS (軟交換機)
 
 | 指標 | 說明 | 計算方式 |
 |------|------|---------|
-| **CPS** | Calls Per Second，每秒發起通話數 | `calls_initiated / duration` |
+| **CPS** | Calls Per Second，每秒發起通話數 | 每秒快照差值 |
+| **SUCCESS** | 目前成功接通通數 | `calls_answered`（累計） |
+| **FAILED** | 目前失敗通數 | `calls_failed + calls_timeout`（累計） |
+| **QUEUED** | 目前佇列中（進行中）通話數 | `calls_initiated - calls_completed - calls_failed - calls_timeout` |
 | **ASR** | Answer Seizure Ratio，接通率 | `calls_answered / calls_initiated × 100%` |
+| **CCR** | Call Completion Rate，完成率 | `calls_completed / calls_initiated × 100%` |
+| **ERR%** | Error Rate，失敗率 | `(calls_failed + calls_timeout) / calls_initiated × 100%` |
 | **ACD** | Average Call Duration，平均通話時長 | HDR Histogram 均值（200 OK → BYE 200 OK） |
 | **PDD** | Post Dial Delay，撥號後延遲 | INVITE 送出 → 收到 180 Ringing（ms） |
 | **Setup Time** | 通話建立時間 | INVITE 送出 → 收到 200 OK（ms） |
@@ -272,6 +279,7 @@ MOS    = 1 + 0.035R + R(R−60)(100−R) × 7×10⁻⁶  ← ITU-T G.107 §B.4
 | `--concurrent` | `-c` | `100` | 最大並發通話數 |
 | `--cps` | — | `10.0` | 每秒發起通話數 |
 | `--duration` | `-d` | `60` | 壓測持續時間（秒） |
+| `--max-calls` | — | 不限 | 總通話上限，達到後自動停止（優先於 `--duration`） |
 | `--call-duration` | — | `30` | 單通通話持續時間（秒，`0` = 不主動 BYE） |
 | `--invite-timeout` | — | `8` | INVITE 逾時秒數 |
 

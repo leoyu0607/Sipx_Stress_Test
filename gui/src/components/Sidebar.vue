@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref } from 'vue'
+import { open } from '@tauri-apps/plugin-dialog'
 import { useTestStore } from '../stores/testStore'
 import GenerateDialog from './GenerateDialog.vue'
 
@@ -25,10 +26,9 @@ async function copyCli() {
   setTimeout(() => (copied.value = false), 2000)
 }
 
-// Audio file picker (Tauri file dialog stub)
 async function pickAudioFile() {
-  // TODO: replace with → const path = await open({ filters: [{ name:'Audio', extensions:['wav','mp3','pcm'] }] })
-  store.addLog('info', 'audio file picker — connect Tauri dialog in production')
+  const path = await open({ multiple: false, filters: [{ name: 'Audio', extensions: ['wav', 'pcm', 'raw', 'mp3'] }] })
+  if (path && typeof path === 'string') store.config.caller.audioFile = path
 }
 
 // Account file upload
@@ -157,6 +157,15 @@ function statusLabel(s: string) {
             <input type="range" min="1" max="200" v-model.number="store.config.caller.cps">
             <input type="number" min="1" max="1000" v-model.number="store.config.caller.cps" class="num-input">
           </div>
+        </div>
+
+        <div class="field">
+          <label>總測試通數 <span class="tag">--max-calls</span></label>
+          <div class="slider-row">
+            <input type="range" min="0" max="10000" step="100" v-model.number="store.config.caller.totalCalls">
+            <input type="number" min="0" v-model.number="store.config.caller.totalCalls" class="num-input">
+          </div>
+          <div class="field-hint">{{ store.config.caller.totalCalls === 0 ? '0 = 不限（依測試時長）' : `達 ${store.config.caller.totalCalls} 通後自動停止` }}</div>
         </div>
 
         <!-- Audio -->

@@ -346,8 +346,11 @@ impl Engine {
                 ));
             }
 
-            // ③ 發起新通話（受 CPS 和並發上限控制）
-            if now >= next_call && now < deadline {
+            // ③ 發起新通話（受 CPS、並發上限、總通數上限控制）
+            let total_limit_reached = cfg.max_total_calls
+                .map_or(false, |max| live.calls_initiated.load(std::sync::atomic::Ordering::Relaxed) >= max);
+
+            if !total_limit_reached && now >= next_call && now < deadline {
                 let concurrent = {
                     let dialogs = dialogs.lock().await;
                     dialogs.values().filter(|d| matches!(
@@ -416,8 +419,11 @@ impl Engine {
                 }
             }
 
-            // ④ 測試結束
-            if now >= deadline {
+            // ④ 測試結束：時間到 OR 總通數達上限且沒有進行中的通話
+            let all_done = total_limit_reached
+                && live.calls_active.load(std::sync::atomic::Ordering::Relaxed) <= 0;
+
+            if now >= deadline || all_done {
                 // 等待剩餘通話結束（最多再等 invite_timeout）
                 time::sleep(Duration::from_secs(2)).await;
                 break;

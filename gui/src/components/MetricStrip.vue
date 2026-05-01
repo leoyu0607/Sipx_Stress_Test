@@ -6,18 +6,16 @@ const store = useTestStore()
 
 const isReady = computed(() => store.status !== 'idle')
 
-// ASR 顏色：≥85% 優、≥70% 普通、<70% 差
 const asrClass = computed(() => {
   if (!isReady.value) return ''
   const v = store.metrics.asr
   return v >= 85 ? 'c-accent' : v >= 70 ? 'c-warn' : 'c-danger'
 })
 
-// CCR 顏色：≥80% 優、≥65% 普通、<65% 差
-const ccrClass = computed(() => {
+const errClass = computed(() => {
   if (!isReady.value) return ''
-  const v = store.metrics.ccr
-  return v >= 80 ? 'c-accent' : v >= 65 ? 'c-warn' : 'c-danger'
+  const v = store.metrics.errorRate
+  return v <= 5 ? 'c-accent' : v <= 20 ? 'c-warn' : 'c-danger'
 })
 </script>
 
@@ -37,6 +35,24 @@ const ccrClass = computed(() => {
     </div>
 
     <div class="cell">
+      <div class="name">SUCCESS</div>
+      <div class="val c-accent">{{ isReady ? store.metrics.succeeded.toLocaleString() : '—' }}</div>
+      <div class="unit">answered</div>
+    </div>
+
+    <div class="cell">
+      <div class="name">FAILED</div>
+      <div class="val c-danger">{{ isReady ? store.metrics.failed.toLocaleString() : '—' }}</div>
+      <div class="unit">failed + timeout</div>
+    </div>
+
+    <div class="cell">
+      <div class="name">QUEUED</div>
+      <div class="val c-blue">{{ isReady ? store.metrics.queued : '—' }}</div>
+      <div class="unit">in-flight</div>
+    </div>
+
+    <div class="cell">
       <div class="name">ASR</div>
       <div class="val" :class="asrClass">
         {{ isReady ? store.metrics.asr.toFixed(1) + '%' : '—' }}
@@ -44,31 +60,18 @@ const ccrClass = computed(() => {
       <div class="unit">answer rate</div>
     </div>
 
-    <!-- 新增 CCR -->
     <div class="cell">
-      <div class="name">CCR</div>
-      <div class="val" :class="ccrClass">
-        {{ isReady ? store.metrics.ccr.toFixed(1) + '%' : '—' }}
+      <div class="name">ERR%</div>
+      <div class="val" :class="errClass">
+        {{ isReady ? store.metrics.errorRate.toFixed(1) + '%' : '—' }}
       </div>
-      <div class="unit">completion rate</div>
+      <div class="unit">error rate</div>
     </div>
 
     <div class="cell">
       <div class="name">PDD</div>
-      <div class="val c-warn">{{ isReady ? store.metrics.pdd + 'ms' : '—' }}</div>
+      <div class="val c-warn">{{ isReady && store.metrics.pdd > 0 ? store.metrics.pdd.toFixed(0) + 'ms' : '—' }}</div>
       <div class="unit">avg delay</div>
-    </div>
-
-    <div class="cell">
-      <div class="name">ACD</div>
-      <div class="val">{{ isReady ? store.metrics.acd + 's' : '—' }}</div>
-      <div class="unit">avg duration</div>
-    </div>
-
-    <div class="cell">
-      <div class="name">FAILED</div>
-      <div class="val c-danger">{{ isReady ? store.metrics.failed : '—' }}</div>
-      <div class="unit">total errors</div>
     </div>
 
   </div>
@@ -77,7 +80,7 @@ const ccrClass = computed(() => {
 <style scoped>
 .metric-strip {
   display: grid;
-  grid-template-columns: repeat(7, 1fr);   /* 原 6 格改為 7 格（加 CCR） */
+  grid-template-columns: repeat(8, 1fr);
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
 }

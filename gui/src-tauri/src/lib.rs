@@ -1,5 +1,4 @@
 mod commands;
-
 use commands::{AppState, get_report, get_snapshot, start_test, stop_test};
 use std::sync::Arc;
 use tracing_subscriber::EnvFilter;
@@ -11,15 +10,13 @@ pub fn run() {
             EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn".into()),
         )
         .init();
+
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(Arc::new(AppState::default()))
         .invoke_handler(tauri::generate_handler![
-            start_test,
-            stop_test,
-            get_snapshot,
-            get_report,
+            start_test, stop_test, get_snapshot, get_report
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

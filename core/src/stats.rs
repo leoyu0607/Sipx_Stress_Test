@@ -16,23 +16,29 @@ pub struct LiveStats {
     pub calls_completed: AtomicU64,
     pub calls_failed:    AtomicU64,
     pub calls_timeout:   AtomicU64,
+    /// 目前進行中的通話（INVITE sent 到 completed/failed/timeout）
+    pub calls_active:    std::sync::atomic::AtomicI64,
 }
 
 impl LiveStats {
     pub fn on_invite(&self) {
         self.calls_initiated.fetch_add(1, Ordering::Relaxed);
+        self.calls_active.fetch_add(1, Ordering::Relaxed);
     }
     pub fn on_answered(&self) {
         self.calls_answered.fetch_add(1, Ordering::Relaxed);
     }
     pub fn on_completed(&self) {
         self.calls_completed.fetch_add(1, Ordering::Relaxed);
+        self.calls_active.fetch_sub(1, Ordering::Relaxed);
     }
     pub fn on_failed(&self) {
         self.calls_failed.fetch_add(1, Ordering::Relaxed);
+        self.calls_active.fetch_sub(1, Ordering::Relaxed);
     }
     pub fn on_timeout(&self) {
         self.calls_timeout.fetch_add(1, Ordering::Relaxed);
+        self.calls_active.fetch_sub(1, Ordering::Relaxed);
     }
 
     /// 快照（用於進度回報 / TUI 更新）
@@ -42,20 +48,28 @@ impl LiveStats {
         let completed  = self.calls_completed.load(Ordering::Relaxed);
         let failed     = self.calls_failed.load(Ordering::Relaxed);
         let timeout    = self.calls_timeout.load(Ordering::Relaxed);
+        let active     = self.calls_active.load(Ordering::Relaxed).max(0) as u64;
 
         let asr = if initiated > 0 {
             answered as f64 / initiated as f64 * 100.0
         } else {
             0.0
         };
+        let error_rate = if initiated > 0 {
+            (failed + timeout) as f64 / initiated as f64 * 100.0
+        } else {
+            0.0
+        };
 
         StatsSnapshot {
-            calls_initiated: initiated,
-            calls_answered:  answered,
-            calls_completed: completed,
-            calls_failed:    failed,
-            calls_timeout:   timeout,
+            calls_initiated:  initiated,
+            calls_answered:   answered,
+            calls_completed:  completed,
+            calls_failed:     failed,
+            calls_timeout:    timeout,
+            calls_concurrent: active,
             asr,
+            error_rate,
         }
     }
 }
@@ -64,13 +78,17 @@ impl LiveStats {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct StatsSnapshot {
-    pub calls_initiated: u64,
-    pub calls_answered:  u64,
-    pub calls_completed: u64,
-    pub calls_failed:    u64,
-    pub calls_timeout:   u64,
+    pub calls_initiated:  u64,
+    pub calls_answered:   u64,
+    pub calls_completed:  u64,
+    pub calls_failed:     u64,
+    pub calls_timeout:    u64,
+    /// 目前進行中通話數
+    pub calls_concurrent: u64,
     /// Answer Seizure Ratio（%）
     pub asr: f64,
+    /// Error Rate = (failed + timeout) / initiated × 100（%）
+    pub error_rate: f64,
 }
 
 // ─── 詳細統計（直方圖，需要 Mutex） ────────────────────────────
