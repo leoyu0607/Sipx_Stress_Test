@@ -15,16 +15,16 @@ path = "src/main.rs"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-sipress-core       = { path = "../../core" }
-tauri              = { version = "2" }
+sipress-core         = { path = "../../core" }
+tauri                = { version = "2", features = [] }
 tauri-plugin-dialog  = "2"
 tauri-plugin-opener  = "2"
-tokio              = { workspace = true }
-anyhow             = { workspace = true }
-serde              = { workspace = true }
-serde_json         = { workspace = true }
-tracing            = { workspace = true }
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tokio                = { workspace = true }
+anyhow               = { workspace = true }
+serde                = { workspace = true }
+serde_json           = { workspace = true }
+tracing              = { workspace = true }
+tracing-subscriber   = { version = "0.3", features = ["env-filter"] }
 
 [features]
 default         = ["custom-protocol"]
