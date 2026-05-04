@@ -5,7 +5,7 @@ use anyhow::Result;
 use args::Args;
 use clap::Parser;
 use sipress_core::{
-    config::Config,
+    config::{Config, Transport},
     engine::{Engine, ProgressCallback},
     html_reporter::HtmlReporter,
     reporter::{OutputFormat, Reporter},
@@ -29,6 +29,12 @@ async fn main() -> Result<()> {
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| filter.into()))
         .init();
 
+    // 解析 transport
+    let transport = match args.transport.to_lowercase().as_str() {
+        "tcp" => Transport::Tcp,
+        _     => Transport::Udp,  // 預設 UDP（包含 "udp" 與其他未知值）
+    };
+
     // 建構設定
     let config = Config {
         server_addr:          args.server.clone(),
@@ -42,11 +48,12 @@ async fn main() -> Result<()> {
         duration_secs:        args.duration,
         call_duration_secs:   args.call_duration,
         invite_timeout_secs:  args.invite_timeout,
+        transport,
         logs_dir:             args.logs_dir.clone(),
         rtp_base_port:        args.rtp_base_port,
         audio_file:           args.audio_file.clone(),
         enable_rtp:           args.enable_rtp,
-        ..Default::default()
+        max_total_calls:      if args.max_calls > 0 { Some(args.max_calls) } else { None },
     };
 
     let engine = Engine::new(config.clone());

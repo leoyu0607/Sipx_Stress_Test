@@ -33,8 +33,8 @@ pub struct Args {
     #[arg(long = "invite-timeout", default_value_t = 8)]
     pub invite_timeout: u64,
 
-    /// 主叫號碼
-    #[arg(long = "from", default_value = "1000")]
+    /// 主叫號碼（接入號 / Caller-ID）
+    #[arg(long = "from", alias = "number", default_value = "1000")]
     pub caller: String,
 
     /// 被叫號碼前綴
@@ -44,6 +44,18 @@ pub struct Args {
     /// 被叫號碼尾數最大值（0..=N 隨機）
     #[arg(long = "to-range", default_value_t = 9999)]
     pub callee_range: u64,
+
+    /// 總通話上限（0 或不設 = 不限，依 duration 決定結束）
+    #[arg(long = "max-calls", default_value_t = 0)]
+    pub max_calls: u64,
+
+    /// 傳輸層協定：udp（預設）/ tcp
+    #[arg(long = "transport", default_value = "udp")]
+    pub transport: String,
+
+    /// 模式：caller（預設，目前唯一支援）
+    #[arg(long = "mode", default_value = "caller", hide = true)]
+    pub mode: String,
 
     /// 本機綁定 IP（預設自動選擇）
     #[arg(long = "local")]
