@@ -96,7 +96,7 @@ impl Default for Config {
             invite_timeout_secs:  8,
             transport:            Transport::Udp,
             logs_dir:             "logs".to_string(),
-            rtp_base_port:        10000,
+            rtp_base_port:        16000,
             audio_file:           None,
             enable_rtp:           false,
             max_total_calls:      None,
