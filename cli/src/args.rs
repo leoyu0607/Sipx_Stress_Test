@@ -37,11 +37,15 @@ pub struct Args {
     #[arg(long = "from", alias = "number", default_value = "1000")]
     pub caller: String,
 
-    /// 被叫號碼前綴
+    /// 固定被叫號碼（指定後所有通話都打給這個號碼，覆蓋 --to-prefix/--to-range）
+    #[arg(long = "to")]
+    pub callee_fixed: Option<String>,
+
+    /// 被叫號碼前綴（與 --to-range 搭配產生隨機被叫；--to 指定時忽略）
     #[arg(long = "to-prefix", default_value = "2")]
     pub callee_prefix: String,
 
-    /// 被叫號碼尾數最大值（0..=N 隨機）
+    /// 被叫號碼尾數最大值（0..=N 隨機；--to 指定時忽略）
     #[arg(long = "to-range", default_value_t = 9999)]
     pub callee_range: u64,
 

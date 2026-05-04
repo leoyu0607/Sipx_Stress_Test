@@ -40,11 +40,14 @@ pub struct Config {
     /// 主叫號碼
     pub caller_number: String,
 
-    /// 被叫號碼前綴
+    /// 被叫號碼前綴（若 callee_fixed 為 Some 則忽略）
     pub callee_prefix: String,
 
-    /// 被叫號碼尾數範圍（0..=callee_range 隨機）
+    /// 被叫號碼尾數範圍（0..=callee_range 隨機；若 callee_fixed 為 Some 則忽略）
     pub callee_range: u64,
+
+    /// 固定被叫號碼（Some = 所有通話打給同一個號碼，覆蓋 prefix/range 隨機產生）
+    pub callee_fixed: Option<String>,
 
     /// 每秒通話數（CPS）
     pub cps: f64,
@@ -89,6 +92,7 @@ impl Default for Config {
             caller_number:        "1000".to_string(),
             callee_prefix:        "2".to_string(),
             callee_range:         9999,
+            callee_fixed:         None,
             cps:                  10.0,
             max_concurrent_calls: 100,
             duration_secs:        60,

@@ -140,8 +140,24 @@ function statusLabel(s: string) {
       <div class="section-body" v-show="sec.profile">
 
         <div class="field">
-          <label>交換機接入號</label>
+          <label>交換機接入號（主叫）</label>
           <input v-model="store.config.caller.accessNumber" type="text" placeholder="例：4008001234">
+          <div class="field-hint">From 標頭中的號碼，告訴交換機「這通是誰打的」</div>
+        </div>
+
+        <div class="field">
+          <label>被叫號碼 <span class="tag">--to</span></label>
+          <input v-model="store.config.caller.calleeFixed" type="text" placeholder="例：8001（留空 = 隨機）">
+          <div class="field-hint">{{ store.config.caller.calleeFixed ? `所有通話都打給 ${store.config.caller.calleeFixed}` : '留空時使用前綴+隨機尾數（壓測分散負載用）' }}</div>
+        </div>
+
+        <div class="field" v-show="!store.config.caller.calleeFixed">
+          <label>被叫前綴 / 尾數範圍 <span class="tag">--to-prefix / --to-range</span></label>
+          <div class="slider-row" style="gap:6px">
+            <input v-model="store.config.caller.calleePrefix" type="text" placeholder="2" style="flex:1">
+            <input type="number" min="0" v-model.number="store.config.caller.calleeRange" class="num-input">
+          </div>
+          <div class="field-hint">例：前綴 80 + 尾數 99 → 隨機產生 80~8099</div>
         </div>
 
         <div class="field">

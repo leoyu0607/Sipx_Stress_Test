@@ -43,6 +43,7 @@ async fn main() -> Result<()> {
         caller_number:        args.caller.clone(),
         callee_prefix:        args.callee_prefix.clone(),
         callee_range:         args.callee_range,
+        callee_fixed:         args.callee_fixed.clone(),
         cps:                  args.cps,
         max_concurrent_calls: args.max_concurrent,
         duration_secs:        args.duration,

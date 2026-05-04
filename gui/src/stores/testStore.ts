@@ -17,11 +17,14 @@ export interface SipAccount {
 
 export interface CallerProfile {
   accessNumber: string
-  concurrency: number
-  cps: number
-  totalCalls: number   // 0 = unlimited
-  enableAudio: boolean
-  audioFile: string
+  calleeFixed:  string   // '' = 用 prefix+range 隨機產生
+  calleePrefix: string
+  calleeRange:  number
+  concurrency:  number
+  cps:          number
+  totalCalls:   number   // 0 = unlimited
+  enableAudio:  boolean
+  audioFile:    string
 }
 
 export interface AgentProfile {
@@ -143,11 +146,14 @@ export const useTestStore = defineStore('test', () => {
     mode: 'caller',
     caller: {
       accessNumber: '4008001234',
-      concurrency: 100,
-      cps: 10,
-      totalCalls: 0,
-      enableAudio: false,
-      audioFile: '',
+      calleeFixed:  '',
+      calleePrefix: '2',
+      calleeRange:  9999,
+      concurrency:  100,
+      cps:          10,
+      totalCalls:   0,
+      enableAudio:  false,
+      audioFile:    '',
     },
     agent: {
       count: 0,
@@ -209,9 +215,12 @@ export const useTestStore = defineStore('test', () => {
     const c = config.value
     const tr = c.transport.toLowerCase()
     if (c.mode === 'caller') {
-      const audio = c.caller.enableAudio && c.caller.audioFile ? ` --audio "${c.caller.audioFile}"` : ''
-      const total = c.caller.totalCalls > 0 ? ` --max-calls ${c.caller.totalCalls}` : ''
-      return `./sipress -s ${c.server} --mode caller --number ${c.caller.accessNumber} -c ${c.caller.concurrency} --cps ${c.caller.cps} --duration ${c.duration} --transport ${tr}${total}${audio}`
+      const audio  = c.caller.enableAudio && c.caller.audioFile ? ` --rtp --audio "${c.caller.audioFile}"` : ''
+      const total  = c.caller.totalCalls > 0 ? ` --max-calls ${c.caller.totalCalls}` : ''
+      const callee = c.caller.calleeFixed
+        ? ` --to ${c.caller.calleeFixed}`
+        : ` --to-prefix ${c.caller.calleePrefix} --to-range ${c.caller.calleeRange}`
+      return `./sipress -s ${c.server} --mode caller --number ${c.caller.accessNumber}${callee} -c ${c.caller.concurrency} --cps ${c.caller.cps} --duration ${c.duration} --transport ${tr}${total}${audio}`
     } else {
       return `./sipress -s ${c.server} --mode agent --accounts accounts.csv --duration ${c.duration} --transport ${tr}`
     }
@@ -245,8 +254,9 @@ export const useTestStore = defineStore('test', () => {
       local_addr:           c.localPort ? `0.0.0.0:${c.localPort}` : null,
       local_domain:         null,
       caller_number:        c.caller.accessNumber,
-      callee_prefix:        '2',
-      callee_range:         9999,
+      callee_prefix:        c.caller.calleePrefix || '2',
+      callee_range:         c.caller.calleeRange  || 9999,
+      callee_fixed:         c.caller.calleeFixed ? c.caller.calleeFixed : null,
       cps:                  c.caller.cps,
       max_concurrent_calls: c.caller.concurrency,
       max_total_calls:      c.caller.totalCalls > 0 ? c.caller.totalCalls : null,
@@ -255,7 +265,7 @@ export const useTestStore = defineStore('test', () => {
       invite_timeout_secs:  8,
       transport:            transportMap[c.transport] ?? 'udp',
       logs_dir:             'logs',
-      rtp_base_port:        10000,
+      rtp_base_port:        16000,
       audio_file:           c.caller.enableAudio && c.caller.audioFile ? c.caller.audioFile : null,
       enable_rtp:           c.caller.enableAudio && !!c.caller.audioFile,
     }

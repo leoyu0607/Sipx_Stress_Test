@@ -411,12 +411,15 @@ impl Engine {
                 };
 
                 if concurrent < cfg.max_concurrent_calls {
-                    // 隨機被叫號碼
-                    let callee = format!(
-                        "{}{}",
-                        cfg.callee_prefix,
-                        rand::thread_rng().gen_range(0..=cfg.callee_range)
-                    );
+                    // 被叫號碼：固定號碼優先，否則 prefix + 隨機尾數
+                    let callee = match &cfg.callee_fixed {
+                        Some(num) if !num.is_empty() => num.clone(),
+                        _ => format!(
+                            "{}{}",
+                            cfg.callee_prefix,
+                            rand::thread_rng().gen_range(0..=cfg.callee_range)
+                        ),
+                    };
 
                     let call_id  = SipMessage::new_call_id(local_domain);
                     let from_tag = SipMessage::new_tag();
