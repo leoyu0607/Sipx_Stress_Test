@@ -66,14 +66,31 @@ impl Engine {
         // 解析 server 地址
         let server_addr: SocketAddr = cfg.server_addr.parse()?;
 
-        // 本機 IP
-        let local_ip = cfg.local_addr.as_deref().unwrap_or("0.0.0.0");
-        let local_domain = cfg.local_domain.as_deref()
-            .unwrap_or_else(|| local_ip.split(':').next().unwrap_or(local_ip));
+        // 本機 IP：若未指定 --local，透過 connect() 探測真實出口 IP，禁止用 0.0.0.0
+        let local_ip_owned: String = match cfg.local_addr.as_deref() {
+            Some(ip) => ip.to_string(),
+            None => {
+                // 建立一個暫時 UDP socket 連向 server，讓 OS 選擇出口介面
+                let probe = tokio::net::UdpSocket::bind("0.0.0.0:0").await?;
+                probe.connect(&cfg.server_addr).await?;
+                let addr = probe.local_addr()?;
+                addr.ip().to_string()
+            }
+        };
+        let local_ip = local_ip_owned.as_str();
 
         // 建立共用 UDP socket
         let udp = Arc::new(SharedUdpSocket::new(server_addr, local_ip).await?);
         let local_addr = udp.local_addr.clone();
+
+        // local_domain 用於 From 標頭與 Call-ID。
+        // 必須在 socket 建立後才推導，以確保取到 OS 填入的真實 IP，
+        // 而非設定中可能是 "0.0.0.0" 的佔位字串。
+        // 優先序：cfg.local_domain > 實際 socket IP > fallback "127.0.0.1"
+        let local_domain_owned = cfg.local_domain.clone().unwrap_or_else(|| {
+            local_addr.split(':').next().unwrap_or("127.0.0.1").to_string()
+        });
+        let local_domain = local_domain_owned.as_str();
 
         // 對話表（Call-ID → Dialog）
         let dialogs: Arc<Mutex<HashMap<String, Dialog>>> =
@@ -197,7 +214,7 @@ impl Engine {
 
                             // 啟動 RTP session（若已啟用）
                             if cfg.enable_rtp {
-                                let pure_ip = local_ip.split(':').next().unwrap_or("0.0.0.0").to_string();
+                                let pure_ip = local_ip.split(':').next().unwrap_or(local_ip).to_string();
                                 let server_ip = cfg.server_addr.split(':').next().unwrap_or("127.0.0.1");
                                 // 優先使用 SDP 解析的對端 port，fallback 為 16384
                                 let remote_port = remote_rtp_port.unwrap_or(16384);
@@ -269,6 +286,31 @@ impl Engine {
                             live.on_completed();
                         }
                         400..=699 if method.as_deref() != Some("BYE") => {
+                            // RFC 3261 §17.1.1.3：非 2xx 最終回應（含 5xx）也必須回 ACK
+                            // 否則交換機會持續重傳，直到 Timer F 超時（通常 32 秒）
+                            let to_tag_for_ack = to_tag.as_deref().unwrap_or("").to_string();
+                            let ack_err = SipMessage::ack(
+                                &dialog.call_id,
+                                &cfg.caller_number,
+                                local_domain,
+                                &dialog.callee,
+                                &to_tag_for_ack,
+                                &cfg.server_addr,
+                                &local_addr,
+                                dialog.cseq,
+                                &dialog.branch,
+                                &dialog.from_tag,
+                                "UDP",
+                            );
+                            let udp_ack  = Arc::clone(&udp);
+                            let log_ack  = Arc::clone(&sip_log);
+                            let srv_ack  = cfg.server_addr.clone();
+                            let ack_copy = ack_err.clone();
+                            tokio::spawn(async move {
+                                log_ack.log_message(Direction::Send, &ack_copy, &srv_ack);
+                                let _ = udp_ack.send(&ack_copy).await;
+                            });
+
                             detail.record_fail_code(code);
                             dialog.on_error(code);
                             live.on_failed();
@@ -384,7 +426,7 @@ impl Engine {
                     // 確保 SDP 中宣告的 port 與後續 RTP session 一致
                     let rtp_port = if cfg.enable_rtp {
                         let pc = Arc::clone(&rtp_port_counter);
-                        let ip = local_ip.split(':').next().unwrap_or("0.0.0.0").to_string();
+                        let ip = local_ip.split(':').next().unwrap_or(local_ip).to_string();
                         match crate::rtp::session::RtpSession::allocate_port(&pc, &ip).await {
                             Ok(p)  => p,
                             Err(e) => {
