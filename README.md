@@ -581,9 +581,23 @@ npm run tauri dev   # 開啟視窗，hot-reload 前端
 - `SipResponse::sdp_rtp_addr()` — 從 200 OK 解析 SDP 的 `c=` connection IP **與** `m=` port，回傳 `"ip:port"`（修正過去只取 port 而誤用 SIP server IP 的 bug）
 - `SipResponse::sdp_rtp_port()` — 向下相容用，只取 port
 
+### `core/src/sip/parser.rs`
+
+統一的 SIP 解析器，支援 RFC 3261 Compact Form 縮寫標頭：
+
+| 縮寫 | 完整名稱 |
+|------|---------|
+| `i:` | `Call-ID:` |
+| `m:` | `Contact:` |
+| `t:` | `To:` |
+
+`SipParser::call_id()` 正確處理 `i:` 縮寫，避免 IMS/SBC 環境下 compact header 導致 Call-ID 解析失敗（通話無法路由）。`SipParser::contact_uri()` 從 200 OK 萃取完整 Contact URI（含 `<>` angle bracket 去除），供 ACK/BYE Request-URI 使用（RFC 3261 §12.2.1.1）。
+
 ### `core/src/rtp/session.rs`
 
 動態 port 分配（從 `rtp_base_port` 掃描 4000 個偶數 port），**在送出 INVITE 之前**就分配好本機 port 並寫入 SDP，收到 200 OK 後才真正啟動 RTP。
+
+**TOCTOU 修正**：`allocate_port()` 現在回傳已綁定的 `(port, UdpSocket)` 而非只有 port number，消除「測試 bind → 釋放 → RtpSession 再 bind」之間的 race window。Engine 在 INVITE 前呼叫 `allocate_port()` 並將 socket 暫存於 `pre_bound_rtp: HashMap<call_id, UdpSocket>`；收到 200 OK 後直接移交給 `RtpSession::start(pre_bound)` 使用。
 
 ### `gui/src-tauri/src/commands.rs`
 
