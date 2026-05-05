@@ -54,6 +54,9 @@ impl SipMessage {
     }
 
     /// 建構 ACK（收到 200 OK 後送出）
+    ///
+    /// `request_uri`: 2xx ACK 應使用 Contact URI（RFC 3261 §13.2.2.4）；
+    ///                non-2xx ACK 傳 None，回退使用 sip:{to}@{server}。
     pub fn ack(
         call_id:     &str,
         from_number: &str,
@@ -66,9 +69,13 @@ impl SipMessage {
         branch:      &str,
         from_tag:    &str,
         transport:   &str,
+        request_uri: Option<&str>,
     ) -> String {
+        let uri = request_uri
+            .map(|u| u.to_string())
+            .unwrap_or_else(|| format!("sip:{}@{}", to_number, server_addr));
         format!(
-            "ACK sip:{to}@{server} SIP/2.0\r\n\
+            "ACK {uri} SIP/2.0\r\n\
              Via: SIP/2.0/{transport} {local};branch={branch}\r\n\
              Max-Forwards: 70\r\n\
              From: <sip:{from}@{from_domain}>;tag={from_tag}\r\n\
@@ -77,6 +84,7 @@ impl SipMessage {
              CSeq: {cseq} ACK\r\n\
              Content-Length: 0\r\n\
              \r\n",
+            uri        = uri,
             to         = to_number,
             server     = server_addr,
             transport  = transport,
@@ -92,6 +100,9 @@ impl SipMessage {
     }
 
     /// 建構 BYE
+    ///
+    /// `request_uri`: 應傳入 200 OK Contact URI（RFC 3261 §12.2.1.1）；
+    ///                None 時回退使用 sip:{to}@{server}。
     pub fn bye(
         call_id:     &str,
         from_number: &str,
@@ -104,9 +115,13 @@ impl SipMessage {
         branch:      &str,
         from_tag:    &str,
         transport:   &str,
+        request_uri: Option<&str>,
     ) -> String {
+        let uri = request_uri
+            .map(|u| u.to_string())
+            .unwrap_or_else(|| format!("sip:{}@{}", to_number, server_addr));
         format!(
-            "BYE sip:{to}@{server} SIP/2.0\r\n\
+            "BYE {uri} SIP/2.0\r\n\
              Via: SIP/2.0/{transport} {local};branch={branch}\r\n\
              Max-Forwards: 70\r\n\
              From: <sip:{from}@{from_domain}>;tag={from_tag}\r\n\
@@ -115,6 +130,7 @@ impl SipMessage {
              CSeq: {cseq} BYE\r\n\
              Content-Length: 0\r\n\
              \r\n",
+            uri         = uri,
             to          = to_number,
             server      = server_addr,
             transport   = transport,

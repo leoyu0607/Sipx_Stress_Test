@@ -16,15 +16,16 @@ export interface SipAccount {
 }
 
 export interface CallerProfile {
-  accessNumber: string
-  calleeFixed:  string   // '' = 用 prefix+range 隨機產生
-  calleePrefix: string
-  calleeRange:  number
-  concurrency:  number
-  cps:          number
-  totalCalls:   number   // 0 = unlimited
-  enableAudio:  boolean
-  audioFile:    string
+  accessNumber:  string
+  calleeFixed:   string   // '' = 用 prefix+range 隨機產生
+  calleePrefix:  string
+  calleeRange:   number
+  concurrency:   number
+  cps:           number
+  totalCalls:    number   // 0 = unlimited
+  callDuration:  number   // per-call duration seconds (0 = unlimited)
+  enableAudio:   boolean
+  audioFile:     string
 }
 
 export interface AgentProfile {
@@ -100,23 +101,24 @@ interface RustSnapshot {
 
 // Rust FinalReport shape (subset we use)
 interface RustReport {
-  calls_initiated: number
-  calls_answered:  number
-  calls_completed: number
-  calls_failed:    number
-  calls_timeout:   number
-  asr:             number
-  ccr:             number
-  actual_cps:      number
-  acd_secs:        number
-  pdd_p50_ms:      number
-  pdd_p95_ms:      number
-  mos:             number | null
-  loss_rate_pct:   number | null
-  jitter_ms:       number | null
-  rtp_sent:        number | null
-  rtp_recv:        number | null
+  calls_initiated:  number
+  calls_answered:   number
+  calls_completed:  number
+  calls_failed:     number
+  calls_timeout:    number
+  asr:              number
+  ccr:              number
+  actual_cps:       number
+  acd_secs:         number
+  pdd_p50_ms:       number
+  pdd_p95_ms:       number
+  mos:              number | null
+  loss_rate_pct:    number | null
+  jitter_ms:        number | null
+  rtp_sent:         number | null
+  rtp_recv:         number | null
   rtp_out_of_order: number | null
+  fail_codes:       Record<string, number>
 }
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -152,6 +154,7 @@ export const useTestStore = defineStore('test', () => {
       concurrency:  100,
       cps:          10,
       totalCalls:   0,
+      callDuration: 30,
       enableAudio:  false,
       audioFile:    '',
     },
@@ -215,12 +218,13 @@ export const useTestStore = defineStore('test', () => {
     const c = config.value
     const tr = c.transport.toLowerCase()
     if (c.mode === 'caller') {
-      const audio  = c.caller.enableAudio && c.caller.audioFile ? ` --rtp --audio "${c.caller.audioFile}"` : ''
-      const total  = c.caller.totalCalls > 0 ? ` --max-calls ${c.caller.totalCalls}` : ''
-      const callee = c.caller.calleeFixed
+      const audio    = c.caller.enableAudio && c.caller.audioFile ? ` --rtp --audio "${c.caller.audioFile}"` : ''
+      const total    = c.caller.totalCalls > 0 ? ` --max-calls ${c.caller.totalCalls}` : ''
+      const callDur  = c.caller.callDuration > 0 ? ` --call-duration ${c.caller.callDuration}` : ''
+      const callee   = c.caller.calleeFixed
         ? ` --to ${c.caller.calleeFixed}`
         : ` --to-prefix ${c.caller.calleePrefix} --to-range ${c.caller.calleeRange}`
-      return `./sipress -s ${c.server} --mode caller --number ${c.caller.accessNumber}${callee} -c ${c.caller.concurrency} --cps ${c.caller.cps} --duration ${c.duration} --transport ${tr}${total}${audio}`
+      return `./sipress -s ${c.server} --mode caller --number ${c.caller.accessNumber}${callee} -c ${c.caller.concurrency} --cps ${c.caller.cps} --duration ${c.duration} --transport ${tr}${total}${callDur}${audio}`
     } else {
       return `./sipress -s ${c.server} --mode agent --accounts accounts.csv --duration ${c.duration} --transport ${tr}`
     }
@@ -261,7 +265,7 @@ export const useTestStore = defineStore('test', () => {
       max_concurrent_calls: c.caller.concurrency,
       max_total_calls:      c.caller.totalCalls > 0 ? c.caller.totalCalls : null,
       duration_secs:        c.duration,
-      call_duration_secs:   30,
+      call_duration_secs:   c.caller.callDuration,
       invite_timeout_secs:  8,
       transport:            transportMap[c.transport] ?? 'udp',
       logs_dir:             'logs',
@@ -297,6 +301,10 @@ export const useTestStore = defineStore('test', () => {
     pushSeries('ccr',  metrics.value.ccr)
     pushSeries('fail', snap.calls_failed + snap.calls_timeout)
 
+    // Approximate live respCodes from snapshot counters
+    respCodes.value['200'] = snap.calls_answered
+    respCodes.value['408'] = snap.calls_timeout
+
     if (snap.calls_failed + snap.calls_timeout > 0)
       addLog('warn', `失敗 ${snap.calls_failed} 逾時 ${snap.calls_timeout}  發起 ${snap.calls_initiated}  ASR ${snap.asr.toFixed(1)}%`)
   }
@@ -330,6 +338,15 @@ export const useTestStore = defineStore('test', () => {
         }
         pushSeries('mos', report.mos ?? 0)
       }
+      // Populate respCodes from final per-code breakdown
+      if (report.fail_codes) {
+        for (const [code, count] of Object.entries(report.fail_codes)) {
+          respCodes.value[code] = count
+        }
+      }
+      // 200 and 408 come from summary counters (may not appear in fail_codes)
+      respCodes.value['200'] = report.calls_answered
+      respCodes.value['408'] = report.calls_timeout
       addLog('ok', `測試完成  發起 ${report.calls_initiated}  接通 ${report.calls_answered}  失敗 ${report.calls_failed + report.calls_timeout}  ASR ${report.asr.toFixed(1)}%  CPS ${report.actual_cps.toFixed(1)}`)
     } catch (e) {
       addLog('warn', `無法取得最終報告: ${e}`)

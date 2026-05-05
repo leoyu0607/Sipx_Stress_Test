@@ -24,6 +24,9 @@ pub struct Dialog {
 
     // 本機 RTP port（INVITE 前預分配，用於 SDP 與 RTP session）
     pub local_rtp_port: u16,
+
+    // 對端 Contact URI（從 200 OK 解析，用於 BYE/ACK Request-URI）
+    pub remote_contact: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -59,17 +62,18 @@ impl Dialog {
         Self {
             call_id,
             from_tag,
-            to_tag:       None,
+            to_tag:         None,
             branch,
-            cseq:         1,
-            state:        DialogState::Calling,
+            cseq:           1,
+            state:          DialogState::Calling,
             invite_sent_at: Instant::now(),
-            ringing_at:   None,
-            answered_at:  None,
-            bye_sent_at:  None,
-            ended_at:     None,
+            ringing_at:     None,
+            answered_at:    None,
+            bye_sent_at:    None,
+            ended_at:       None,
             callee,
             local_rtp_port,
+            remote_contact: None,
         }
     }
 

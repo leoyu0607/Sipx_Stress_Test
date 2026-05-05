@@ -1,10 +1,4 @@
 /// 單通通話的 RTP Session
-/// 負責：
-///   1. 綁定 UDP port（依設定的起始 port 動態分配）
-///   2. 每 20ms 傳送一個 G.711 frame
-///   3. 接收對端 RTP，計算 jitter/loss
-///   4. 通話結束時產生 RtpStatsSnapshot
-
 use crate::rtp::{
     audio::AudioSource,
     packet::{RtpPacket, PT_PCMU},
@@ -35,7 +29,7 @@ pub struct RtpSessionConfig {
     pub audio_file:  Option<std::path::PathBuf>,
     /// SSRC（None = 隨機）
     pub ssrc:        Option<u32>,
-    /// 預先分配的本機 RTP port（Some = 跳過動態分配，直接綁定此 port）
+    /// 預先分配的本機 RTP port（Some = 跳過動態分配）
     pub local_port:  Option<u16>,
 }
 
@@ -47,45 +41,48 @@ pub struct RtpSession {
 }
 
 impl RtpSession {
-    /// 啟動 RTP session（非同步，spawn 兩個 task：傳送 + 接收）
+    /// 啟動 RTP session
+    ///
+    /// `pre_bound`: 已綁定的本機 socket（從 `allocate_port` 取得）。
+    /// 若傳入 Some，直接使用該 socket（避免 TOCTOU 競態）；
+    /// 若傳入 None，重新動態分配 port。
     pub async fn start(
         config: RtpSessionConfig,
         port_counter: Arc<Mutex<u16>>,
+        pre_bound: Option<UdpSocket>,
     ) -> Result<Self> {
-        // 使用預分配 port，或動態從 port_counter 找可用 port
-        let local_port = match config.local_port {
-            Some(p) => p,
-            None    => Self::allocate_port(&port_counter, &config.local_ip).await?,
+        let (socket, local_port) = if let Some(sock) = pre_bound {
+            let port = sock.local_addr()?.port();
+            sock.connect(&config.remote_addr)
+                .await
+                .with_context(|| format!("無法連接 RTP 對端: {}", config.remote_addr))?;
+            (Arc::new(sock), port)
+        } else {
+            // 沒有預分配 socket，動態尋找可用 port
+            let (port, sock) = Self::allocate_port(&port_counter, &config.local_ip).await?;
+            sock.connect(&config.remote_addr)
+                .await
+                .with_context(|| format!("無法連接 RTP 對端: {}", config.remote_addr))?;
+            (Arc::new(sock), port)
         };
 
-        let bind_addr  = format!("{}:{}", config.local_ip, local_port);
-        let socket     = UdpSocket::bind(&bind_addr)
-            .await
-            .with_context(|| format!("無法綁定 RTP socket: {}", bind_addr))?;
-
-        socket.connect(&config.remote_addr)
-            .await
-            .with_context(|| format!("無法連接 RTP 對端: {}", config.remote_addr))?;
-
-        let socket     = Arc::new(socket);
-        let stats      = Arc::new(RtpStats::new());
-        let stop_flag  = Arc::new(AtomicBool::new(false));
-        let ssrc       = config.ssrc.unwrap_or_else(|| rand::thread_rng().gen());
+        let stats     = Arc::new(RtpStats::new());
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        let ssrc      = config.ssrc.unwrap_or_else(|| rand::thread_rng().gen());
 
         // ── Task A：傳送（每 20ms 一個 frame）──
         {
-            let socket    = Arc::clone(&socket);
-            let stats     = Arc::clone(&stats);
-            let stop      = Arc::clone(&stop_flag);
+            let socket     = Arc::clone(&socket);
+            let stats      = Arc::clone(&stats);
+            let stop       = Arc::clone(&stop_flag);
             let audio_path = config.audio_file.clone();
 
             tokio::spawn(async move {
                 let mut source = match &audio_path {
-                    Some(p) => AudioSource::from_file(p)
-                        .unwrap_or_else(|e| {
-                            tracing::warn!("音檔載入失敗（{:?}），改用靜音: {}", p, e);
-                            AudioSource::silence()
-                        }),
+                    Some(p) => AudioSource::from_file(p).unwrap_or_else(|e| {
+                        tracing::warn!("音檔載入失敗（{:?}），改用靜音: {}", p, e);
+                        AudioSource::silence()
+                    }),
                     None => AudioSource::silence(),
                 };
 
@@ -100,12 +97,11 @@ impl RtpSession {
 
                     let frame = match source.next_frame() {
                         Some(f) => f,
-                        None    => break,  // 非循環模式播完
+                        None    => break,
                     };
 
                     let pkt   = RtpPacket::new(PT_PCMU, seq, ts, ssrc, frame.clone());
                     let bytes = pkt.encode();
-
                     stats.on_send(frame.len());
 
                     if let Err(e) = socket.send(&bytes).await {
@@ -114,7 +110,7 @@ impl RtpSession {
                     }
 
                     seq = seq.wrapping_add(1);
-                    ts  = ts.wrapping_add(160); // 20ms @ 8kHz
+                    ts  = ts.wrapping_add(160);
                 }
             });
         }
@@ -129,12 +125,7 @@ impl RtpSession {
                 let mut buf = vec![0u8; 1500];
                 loop {
                     if stop.load(Ordering::Relaxed) { break; }
-
-                    // 設定 50ms 逾時，讓 stop_flag 有機會被偵測
-                    match time::timeout(
-                        Duration::from_millis(50),
-                        socket.recv(&mut buf),
-                    ).await {
+                    match time::timeout(Duration::from_millis(50), socket.recv(&mut buf)).await {
                         Ok(Ok(n)) => {
                             if let Some(pkt) = RtpPacket::decode(&buf[..n]) {
                                 let now_us = SystemTime::now()
@@ -145,11 +136,8 @@ impl RtpSession {
                                 debug!("RTP recv seq={} ts={}", pkt.sequence, pkt.timestamp);
                             }
                         }
-                        Ok(Err(e)) => {
-                            debug!("RTP 接收錯誤: {}", e);
-                            break;
-                        }
-                        Err(_) => {} // timeout，繼續迴圈
+                        Ok(Err(e)) => { debug!("RTP 接收錯誤: {}", e); break; }
+                        Err(_) => {} // timeout，繼續
                     }
                 }
             });
@@ -164,29 +152,29 @@ impl RtpSession {
         self.stats.snapshot()
     }
 
-    /// 本機 RTP port（供 SDP 填寫）
+    /// 本機 RTP port
     pub fn local_port(&self) -> u16 {
         self.local_rtp_port
     }
 
     // ── Port 分配 ────────────────────────────────────────────────
 
-    /// 從 counter 指向的 port 開始，找到可用的偶數 port 並推進計數器
-    /// 設為 pub 以供 engine 在送 INVITE 前預分配
+    /// 從計數器指向的 port 開始，找到可用的偶數 port 並推進計數器。
+    /// 回傳 `(port, 已綁定的 UdpSocket)`：socket 保持綁定狀態，
+    /// 消除「測試 → 釋放 → 再綁定」的 TOCTOU 競態。
     pub async fn allocate_port(
         counter:  &Arc<Mutex<u16>>,
         local_ip: &str,
-    ) -> Result<u16> {
+    ) -> Result<(u16, UdpSocket)> {
         let mut guard = counter.lock().await;
         let start = *guard;
-        // 嘗試最多 2000 個 port（對應 1000 通並發通話）
         for offset in (0u16..4000).step_by(2) {
             let port = start.wrapping_add(offset);
             if port < 1024 { continue; }
             let addr = format!("{}:{}", local_ip, port);
-            if UdpSocket::bind(&addr).await.is_ok() {
+            if let Ok(socket) = UdpSocket::bind(&addr).await {
                 *guard = port.wrapping_add(2);
-                return Ok(port);
+                return Ok((port, socket));
             }
         }
         anyhow::bail!("無法找到可用的 RTP port（從 {} 開始）", start);

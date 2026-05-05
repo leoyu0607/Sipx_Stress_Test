@@ -100,8 +100,8 @@ async fn main() -> Result<()> {
         if args.html {
             let ts = report_timestamp();
             match HtmlReporter::save(&report, &args.report_dir, &ts, &args.server) {
-                Ok(path) => eprintln!("[sipress] HTML 報告 → {}", path.display()),
-                Err(e)   => eprintln!("[sipress] HTML 報告失敗：{}", e),
+                Ok(path) => tracing::info!("HTML 報告 → {}", path.display()),
+                Err(e)   => tracing::warn!("HTML 報告失敗：{}", e),
             }
         }
 
@@ -109,7 +109,7 @@ async fn main() -> Result<()> {
     } else {
         let on_progress: Option<ProgressCallback> = if args.verbose {
             Some(Arc::new(|snap: StatsSnapshot, progress: f64| {
-                eprintln!(
+                tracing::info!(
                     "[{:.0}%] 發起={} 接通={} 失敗={} ASR={:.1}%",
                     progress * 100.0,
                     snap.calls_initiated,
@@ -129,8 +129,8 @@ async fn main() -> Result<()> {
         if args.html {
             let ts = report_timestamp();
             match HtmlReporter::save(&report, &args.report_dir, &ts, &args.server) {
-                Ok(path) => eprintln!("[sipress] HTML 報告 → {}", path.display()),
-                Err(e)   => eprintln!("[sipress] HTML 報告失敗：{}", e),
+                Ok(path) => tracing::info!("HTML 報告 → {}", path.display()),
+                Err(e)   => tracing::warn!("HTML 報告失敗：{}", e),
             }
         }
     }
