@@ -316,32 +316,53 @@ dialogs.retain(|_, d| matches!(
 
 ## 7. core — SIP 解析 sip/parser.rs & transport.rs
 
-### SIP 回應解析（message.rs 中的 SipResponse）
+### SipParser — Compact Form 支援
 
-sipress 只需要解析回應（UAC 模式，不處理請求）：
+sipress 使用 `SipParser` struct（`core/src/sip/parser.rs`）統一解析所有 SIP header，**完整支援 RFC 3261 §7.3.3 Compact Form**。部分 SIP 軟交換機（尤其高負載時）會發送縮寫 header，若不支援則無法正確識別通話：
+
+| Compact | 標準名稱 | SipParser 方法 |
+|---------|----------|---------------|
+| `i:` | `Call-ID:` | `call_id()` |
+| `t:` | `To:` | `to_tag()` |
+| `f:` | `From:` | `from_tag()` |
+| `m:` | `Contact:` | `contact()` / `contact_uri()` |
+| `v:` | `Via:` | `via()` |
+| `l:` | `Content-Length:` | `content_length()` |
+
+核心輔助方法 `header_value(raw, names: &[&str])` 接受多個別名一次查找：
 
 ```rust
-pub fn status_code(raw: &str) -> Option<u16> {
-    // 取第一行，格式：SIP/2.0 200 OK
-    let line = raw.lines().next()?;
-    line.splitn(3, ' ').nth(1)?.parse().ok()
+pub fn call_id(raw: &str) -> Option<String> {
+    Self::header_value(raw, &["call-id", "i"])  // 同時匹配長短形式
 }
 ```
 
 **重要**：解析函數全部是 `Option<T>` 回傳，不 panic。原始 UDP 封包可能損毀或截斷，必須容錯。
 
+### Contact URI 解析
+
+```rust
+pub fn contact_uri(raw: &str) -> Option<String> {
+    let val = Self::header_value(raw, &["contact", "m"])?;
+    // <sip:user@host:port;params> → sip:user@host:port（剝除角括號與 URI 參數）
+    if let Some(start) = val.find('<') {
+        if let Some(end_rel) = val[start..].find('>') {
+            return Some(val[start + 1..start + end_rel].to_string());
+        }
+    }
+    Some(val.split(';').next().unwrap_or(&val).trim().to_string())
+}
+```
+
+`contact_uri()` 從 200 OK 的 Contact header 取出純 SIP URI，引擎將其儲存在 `dialog.remote_contact`，ACK 與 BYE 使用該 URI 作為 Request-URI（RFC 3261 §12.2.1.1）。
+
 ### CSeq Method 解析
 
 ```rust
 pub fn cseq_method(raw: &str) -> Option<String> {
-    // CSeq: 1 INVITE  → 取第二個 token "INVITE"
-    for line in raw.lines() {
-        if line.to_lowercase().starts_with("cseq:") {
-            return line[5..].trim().split_whitespace().nth(1)
-                .map(|s| s.to_uppercase());
-        }
-    }
-    None
+    let val = Self::header_value(raw, &["cseq"])?;
+    val.split_whitespace().nth(1).map(|s| s.to_uppercase())
+    // "1 INVITE" → "INVITE"
 }
 ```
 
@@ -351,10 +372,10 @@ pub fn cseq_method(raw: &str) -> Option<String> {
 
 ```rust
 pub fn sdp_rtp_port(raw: &str) -> Option<u16> {
-    // 找到 SIP/SDP 分界（空行 \r\n\r\n）
+    // 找到 SIP/SDP 分界（空行 \r\n\r\n 或 \n\n）
     let body_start = raw.find("\r\n\r\n").map(|i| i + 4)
         .or_else(|| raw.find("\n\n").map(|i| i + 2))?;
-    // m=audio 16384 RTP/AVP 0  → 取第二個 token "16384"
+    // m=audio 16384 RTP/AVP 0 8  → 取第二個 token "16384"
     for line in raw[body_start..].lines() {
         if line.starts_with("m=") {
             let parts: Vec<&str> = line.splitn(4, ' ').collect();
@@ -410,6 +431,32 @@ tokio::spawn ─── Task 2：進度回報（每秒）
 - 用 `tokio::Mutex` 而非 `std::sync::Mutex`，在 `.await` 期間可以釋放 lock
 - 單一主控迴圈避免了 race condition
 
+### SipEvent 內部事件
+
+引擎用 `SipEvent` 從接收 task 傳遞解析結果給主控迴圈：
+
+```rust
+enum SipEvent {
+    /// SIP 回應（UAC 收到的 1xx/2xx/4xx/5xx/6xx）
+    Response {
+        call_id:         String,          // 支援 "i:" compact form
+        code:            u16,             // 狀態碼
+        to_tag:          Option<String>,  // To-tag（200 OK 建立 dialog）
+        method:          Option<String>,  // CSeq method（區分 INVITE/BYE）
+        remote_rtp_addr: Option<String>,  // SDP c=+m= 解析出的對端 RTP "ip:port"
+        contact_uri:     Option<String>,  // Contact header 純 URI（ACK/BYE 使用）
+    },
+    /// 伺服器主動發來的 SIP 請求（RE-INVITE 刷新 session / 伺服器 BYE 掛斷）
+    IncomingRequest {
+        call_id: String,
+        method:  String,
+        raw:     String,  // 原始訊息（建構 200 OK 回應，鏡射 Via/From/To/CSeq）
+    },
+}
+```
+
+`contact_uri` 從 200 OK 的 Contact header 提取（由 `SipParser::contact_uri()` 解析），收到後儲存在 `dialog.remote_contact`，後續 ACK 和 BYE 作為 Request-URI，符合 RFC 3261 §12.2.1.1。
+
 ### Task 1：接收迴圈（區分回應與請求）
 
 ```rust
@@ -419,14 +466,27 @@ tokio::spawn(async move {
         let n = udp_recv.socket.recv(&mut buf).await?;
         let raw = String::from_utf8_lossy(&buf[..n]).into_owned();
 
+        // 使用 SipParser（支援 compact form，i: = Call-ID, m: = Contact…）
+        let call_id = SipParser::call_id(&raw);   // 支援 "i:" compact form
+
         if raw.starts_with("SIP/2.0") {
             // SIP 回應 → SipEvent::Response
-            let _ = ev_tx2.send(SipEvent::Response { call_id, code, ... });
+            let code            = SipParser::status_code(&raw);
+            let to_tag          = SipParser::to_tag(&raw);
+            let method          = SipParser::cseq_method(&raw);
+            let remote_rtp_addr = if code == Some(200) { SipParser::sdp_rtp_addr(&raw) } else { None };
+            let contact_uri     = if code == Some(200) { SipParser::contact_uri(&raw) } else { None };
+            if let (Some(cid), Some(code)) = (call_id, code) {
+                let _ = ev_tx2.send(SipEvent::Response { call_id: cid, code, to_tag, method, remote_rtp_addr, contact_uri });
+            }
         } else {
             // SIP 請求（伺服器主動：RE-INVITE / BYE）→ SipEvent::IncomingRequest
-            let method = raw.lines().next().and_then(|l| l.split_whitespace().next())...;
-            if method == "INVITE" || method == "BYE" {
-                let _ = ev_tx2.send(SipEvent::IncomingRequest { call_id, method, raw });
+            let req_method = raw.lines().next()
+                .and_then(|l| l.split_whitespace().next()).unwrap_or("").to_string();
+            if (req_method == "INVITE" || req_method == "BYE") {
+                if let Some(cid) = call_id {
+                    let _ = ev_tx2.send(SipEvent::IncomingRequest { call_id: cid, method: req_method, raw });
+                }
             }
         }
     }
@@ -518,6 +578,31 @@ if now >= deadline || all_done {
 | `total_limit_reached && calls_active <= 0` | 達通數上限且沒有進行中的通話 |
 | stop channel 收到訊號（GUI Stop）| `tokio::select!` 中斷 engine |
 
+### ACK 與 BYE 的 Request-URI（RFC 3261 合規）
+
+RFC 3261 §12.2.1.1 規定：**2xx ACK 的 Request-URI 必須使用 Contact header 中的 URI**，而非原始的 To header URI。這確保後續請求能路由到正確的 UA（對方可能在 NAT 後方）。
+
+```rust
+// 收到 200 OK for INVITE 時：
+dialog.remote_contact = contact_uri.clone();  // 儲存 Contact URI
+
+// 送 ACK 時：
+let ack = SipMessage::ack(
+    ...
+    dialog.remote_contact.as_deref(),  // 傳入 Contact URI（若有）
+);
+// SipMessage::ack() 內部：若 contact_uri.is_some()，以之作為 Request-URI
+```
+
+**Non-2xx ACK（4xx/5xx/6xx）**：遵循 RFC 3261 §17.1.1.3，使用原始 INVITE 的 branch，且 Request-URI 保持與原 INVITE 相同，**不**使用 Contact URI：
+
+```rust
+400..=699 if method.as_deref() != Some("BYE") => {
+    // non-2xx ACK 使用原始 INVITE branch，Request-URI 不變
+    let ack_err = SipMessage::ack(..., None);  // contact_uri = None → 用原始 To URI
+}
+```
+
 ### 主迴圈睡眠時間
 
 ```rust
@@ -593,36 +678,60 @@ sipress 使用：
 
 ## 11. core — RTP Session rtp/session.rs
 
-### Port 預分配機制
+### Port 預分配機制（TOCTOU 競態消除）
 
 這是 sipress 中最重要的設計之一：**RTP port 在 INVITE 送出前就必須分配完成**，才能寫入 SDP。
 
-```rust
-// engine.rs 中，送 INVITE 前：
-let rtp_port = if cfg.enable_rtp {
-    RtpSession::allocate_port(&port_counter, &local_ip).await?
-} else {
-    0  // 未啟用 RTP，SDP 填 port=9（停用）
-};
+早期實作的 `allocate_port()` 只回傳 port 號，bind 後立即釋放 socket。`RtpSession::start()` 收到 200 OK 後再重新 bind，中間存在「bind → release → rebind」的 **TOCTOU（Time-of-Check-Time-of-Use）競態**：在高 CPS 環境下，兩通 call 可能在微秒內爭搶同一個 port。
 
-let invite = SipMessage::invite(..., rtp_port);
-// SDP 中：m=audio {rtp_port} RTP/AVP 0 8
-```
-
-`allocate_port()` 掃描從 `rtp_base_port` 開始的偶數 port，嘗試 `bind()` 確認可用：
+**改正後**：`allocate_port()` 回傳 `(u16, UdpSocket)`，socket **持續綁定** 直到傳入 `RtpSession::start()`：
 
 ```rust
-for offset in (0u16..4000).step_by(2) {
-    let port = start.wrapping_add(offset);
-    let addr = format!("{}:{}", local_ip, port);
-    if UdpSocket::bind(&addr).await.is_ok() {
-        *guard = port.wrapping_add(2);
-        return Ok(port);
+// allocate_port：bind 後保持 socket，回傳 (port, 已綁定 socket)
+pub async fn allocate_port(
+    counter:  &Arc<Mutex<u16>>,
+    local_ip: &str,
+) -> Result<(u16, UdpSocket)> {
+    let mut guard = counter.lock().await;
+    for offset in (0u16..4000).step_by(2) {
+        let port = start.wrapping_add(offset);
+        if let Ok(socket) = UdpSocket::bind(&addr).await {
+            *guard = port.wrapping_add(2);
+            return Ok((port, socket));  // ← socket 保持綁定，不釋放
+        }
     }
 }
+
+// engine.rs 送 INVITE 前：
+let (rtp_port, rtp_socket) = RtpSession::allocate_port(&counter, local_ip).await?;
+pre_bound_rtp.insert(call_id.clone(), rtp_socket);   // ← 暫存，port 持續佔用
+
+// engine.rs 收到 200 OK 後：
+let pre_socket = pre_bound_rtp.remove(&call_id);     // ← 取出已綁定的 socket
+RtpSession::start(rtp_cfg, counter, pre_socket).await // ← 傳入 pre_bound
 ```
 
-**注意**：`bind()` 成功後立即釋放 socket，稍後在 `RtpSession::start()` 中再次綁定。這中間有極短的 race window，但在壓測場景下實際問題極少（系統不太可能在微秒內把剛釋放的 port 分配給別人）。
+`RtpSession::start()` 的 `pre_bound: Option<UdpSocket>` 參數：
+
+```rust
+pub async fn start(
+    config:    RtpSessionConfig,
+    counter:   Arc<Mutex<u16>>,
+    pre_bound: Option<UdpSocket>,   // Some = 直接使用（TOCTOU 安全），None = 動態分配
+) -> Result<Self> {
+    let (socket, local_port) = if let Some(sock) = pre_bound {
+        let port = sock.local_addr()?.port();
+        sock.connect(&config.remote_addr).await?;   // 只需 connect，不需再 bind
+        (Arc::new(sock), port)
+    } else {
+        // fallback：重新動態分配（低 CPS 場景仍可用）
+        let (port, sock) = Self::allocate_port(&counter, &config.local_ip).await?;
+        sock.connect(&config.remote_addr).await?;
+        (Arc::new(sock), port)
+    };
+    ...
+}
+```
 
 ### 兩個並發 Task
 
@@ -689,6 +798,44 @@ jitter_x16_us.store(new_j, Relaxed);
 ```
 
 最終輸出：`jitter_x16_us / 16 / 8 ms`（8kHz clock 單位 → ms）
+
+### 掉包率計算（RFC 3550 §A.3 標準實作）
+
+早期實作以「傳送數 vs 接收數」計算掉包率，缺點是假設傳送端計數可靠（接收端根本看不到傳送端的計數）。
+
+**RFC 3550 §A.3 正確做法**：以**接收端序號空間**計算 expected 封包數：
+
+```
+expected = (max_seq - first_seq + 1) + seq_cycles × 65536
+lost     = expected - received
+loss_rate = lost / expected
+```
+
+sipress 追蹤三個欄位：
+
+```rust
+pub struct RtpStats {
+    first_seq:  Mutex<Option<u16>>,  // 收到的第一個序號
+    max_seq:    Mutex<Option<u16>>,  // 目前看到的最高序號
+    seq_cycles: AtomicU64,           // u16 序號 wrap-around 次數（每回繞 +1）
+    ...
+}
+```
+
+`on_recv()` 中的 wrap-around 偵測：
+
+```rust
+if seq < prev_max && diff < 0x8000 {
+    // 序號從 65535 回繞到小數值（forward wrap），cycles 計數 +1
+    self.seq_cycles.fetch_add(1, Ordering::Relaxed);
+}
+```
+
+計算 expected 時加回 `cycles × 65536`，確保長時通話（序號多次繞回）仍能正確統計。
+
+**為什麼不用傳送計數？**
+- 接收端看不到傳送端的計數器狀態
+- 傳送端計數器只在同一個程序內可用，無法反映真實網路掉包
 
 ### MOS 估算（ITU-T E-Model 簡化版）
 
@@ -1164,31 +1311,69 @@ export const useTestStore = defineStore('test', () => {
 })
 ```
 
-### Config 轉換（frontend → Rust）
+### CallerProfile — 新增 callDuration
 
-前端 `TestConfig` 的欄位名與 Rust `Config` struct 的欄位名必須一致（Tauri 自動 camelCase ↔ snake_case 轉換），例如：
+`CallerProfile` 介面新增 `callDuration` 欄位，對應 Rust Config 的 `call_duration_secs`：
 
 ```typescript
-// TypeScript（camelCase）
-interface RustConfig {
-    server_addr:          string;   // Tauri 2 預設不轉換，保持 snake_case
-    max_concurrent_calls: number;
-    max_total_calls:      number | null;
-    duration_secs:        number;
+export interface CallerProfile {
+    ...
+    callDuration: number   // per-call duration seconds（0 = 不主動 BYE，等對方掛斷）
 }
+```
 
-function buildRustConfig(): RustConfig {
+預設值 30 秒，對應 `call_duration_secs: 30`。
+
+### Config 轉換（frontend → Rust）
+
+前端 `TestConfig` 的欄位名與 Rust `Config` struct 的欄位名必須一致（Tauri 自動 camelCase ↔ snake_case 轉換）。`buildRustConfig()` 包含 `call_duration_secs`：
+
+```typescript
+function buildRustConfig() {
+    const c = config.value
     return {
-        server_addr:          config.value.server,
-        duration_secs:        config.value.duration,
-        max_total_calls:      config.value.caller.totalCalls > 0
-                                  ? config.value.caller.totalCalls : null,
+        server_addr:          c.server,
+        duration_secs:        c.duration,
+        max_total_calls:      c.caller.totalCalls > 0 ? c.caller.totalCalls : null,
+        call_duration_secs:   c.caller.callDuration,   // ← 新增，對應 --call-duration
         // ...
     }
 }
 ```
 
 **注意**：`max_total_calls: 0` 在 Rust 端是 `Option<u64>` 的 `None`（不限），前端傳 `null` 對應 Rust `None`，傳 `0` 對應 `Some(0)`（立即停止）。因此前端必須明確將 0 轉換為 `null`。
+
+`cliCommand` computed 對應加入 `--call-duration` 選項：
+
+```typescript
+const callDur = c.caller.callDuration > 0 ? ` --call-duration ${c.caller.callDuration}` : ''
+// callDuration = 0 不輸出 --call-duration（保持 Rust 端預設）
+```
+
+### respCodes — 即時與最終兩階段更新
+
+`respCodes` 是 `Record<string, number>`，在兩個不同時機更新：
+
+**即時（`applySnapshot()`）**：每秒從快照計數器更新 200/408 的近似值：
+```typescript
+respCodes.value['200'] = snap.calls_answered   // 即時接通數
+respCodes.value['408'] = snap.calls_timeout    // 即時逾時數
+```
+
+**最終（`_tryFetchReport()`）**：測試完成後從 `FinalReport.fail_codes` 取得精確的 4xx/5xx/6xx 分佈，再補上 200/408：
+```typescript
+// fail_codes: Record<string, number> — Rust 端統計的各錯誤碼數量
+if (report.fail_codes) {
+    for (const [code, count] of Object.entries(report.fail_codes)) {
+        respCodes.value[code] = count   // 486, 404, 503 等
+    }
+}
+// 200 OK 和 408 Timeout 由 summary 計數器補充
+respCodes.value['200'] = report.calls_answered
+respCodes.value['408'] = report.calls_timeout
+```
+
+`RustReport` 介面包含 `fail_codes: Record<string, number>` 欄位，由 Rust `FinalReport.fail_codes` 序列化而來。
 
 ### 輪詢機制
 
@@ -1272,6 +1457,41 @@ App.vue
 - `duration` 欄位 `min="0"`，設為 0 時顯示「不限時間」提示
 - `totalCalls` 欄位設為 0 時顯示「不限（依測試時長）」提示
 - 音檔選擇器使用 `@tauri-apps/plugin-dialog` 的 `open()` 函數（非 `<input type="file">`，因為 Tauri WebView 的 file input 在某些平台需要特殊 capability）
+
+**新增：單通時長（callDuration）滑桿**
+
+在民眾端設定（總通數上限下方）新增 `callDuration` 控制：
+
+```html
+<div class="field">
+  <label>單通時長 (s) <span class="tag">--call-duration</span></label>
+  <div class="slider-row">
+    <input type="range" min="0" max="300" v-model.number="store.config.caller.callDuration">
+    <input type="number" min="0" v-model.number="store.config.caller.callDuration" class="num-input">
+  </div>
+  <div class="field-hint">
+    {{ store.config.caller.callDuration === 0 ? '0 = 不限（直到對方掛斷）' : `接通後約 ${store.config.caller.callDuration} 秒掛斷` }}
+  </div>
+</div>
+```
+
+`v-model.number` 確保雙向綁定為數字型別（不是字串），max=300 限制最大值。
+
+**新增：座席端 Coming Soon 橫幅**
+
+座席端（Agent）tab 目前尚未實作，在 section-body 頂部顯示提示橫幅：
+
+```html
+<div class="coming-soon-banner">
+  <span class="cs-icon">🚧</span>
+  <div>
+    <div class="cs-title">尚未實作</div>
+    <div class="cs-sub">座席端模式仍在開發中，目前僅支援民眾端（主動撥出）</div>
+  </div>
+</div>
+```
+
+`.coming-soon-banner` 使用半透明黃色背景（`rgba(255, 180, 0, 0.07)`）加 25% 黃色邊框，視覺上明顯但不干擾佈局。
 
 ### ChartPanel.vue — 折線圖
 
@@ -1363,6 +1583,25 @@ RTP 每個 Session 有兩個 tokio task stack（預設 2MB 每 task），但 tok
 3. 發起新通話（③）
 
 這三步是**順序執行**（不是並發），每次都 `lock().await` 然後立即 drop。接收 Task 透過 channel 傳遞事件，不直接存取 `dialogs`，所以不存在真正的競爭。
+
+### H. TOCTOU 競態消除的設計決策
+
+**問題**：早期 `allocate_port()` bind 成功後立即釋放 socket，再由 `RtpSession::start()` 重新 bind。在高 CPS 壓測下，兩通通話的 port 分配幾乎同時發生，中間的極短 race window（通常 < 1µs）足以讓另一通 call 的 bind 搶先佔用同一個 port，導致 EADDRINUSE 錯誤。
+
+**解法**：`allocate_port()` 改為回傳 `(u16, UdpSocket)`，socket 保持綁定狀態存入 `pre_bound_rtp` HashMap，直到 200 OK 時才移交給 `RtpSession::start(pre_bound: Some(socket))`。從 bind 成功到 connect 對端，port 從未被釋放，競態完全消除。
+
+**代價**：每通進行中的 call 額外持有一個已綁定但未 connect 的 UdpSocket（約 200 bytes kernel 資源）。10,000 並發下約 2MB kernel socket buffer，可接受。
+
+### I. RFC 3261 合規：ACK 的 Request-URI
+
+**問題**：sipress 早期的 ACK Request-URI 使用原始 To header 中的 URI（INVITE 的 Request-URI）。RFC 3261 §12.2.1.1 明確規定 **2xx ACK 必須使用 Contact URI**，因為 200 OK 的 Contact 可能反映 UAS 在 NAT 後的真實地址（與 To URI 不同）。
+
+**解法**：
+1. `SipParser::contact_uri()` 從 200 OK 解析 Contact header，剝除角括號與 URI 參數
+2. 引擎將其存入 `dialog.remote_contact: Option<String>`
+3. `SipMessage::ack()` 接受 `contact_uri: Option<&str>` 參數；有值時作為 Request-URI
+
+**Non-2xx ACK**（RFC 3261 §17.1.1.3）：收到 4xx/5xx/6xx 的 ACK 是事務層行為，Request-URI 保持與 INVITE 相同，**不**使用 Contact URI（傳入 `None`）。
 
 ### H. 壓測工具本身的性能上限
 
