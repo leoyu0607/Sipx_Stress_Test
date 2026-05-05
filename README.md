@@ -151,20 +151,23 @@ sipress/
 ```
 UAC (sipress)              UAS (軟交換機)
      │                          │
-     │──── INVITE ─────────────▶│  本機 RTP port 寫入 SDP m= 行
+     │──── INVITE ─────────────▶│  本機 RTP port 預分配並寫入 SDP m= 行
      │◀─── 100 Trying ──────────│
      │◀─── 180 Ringing ─────────│  PDD 計時結束
-     │◀─── 200 OK ──────────────│  通話建立，解析對端 RTP port
-     │──── ACK ────────────────▶│
+     │◀─── 200 OK ──────────────│  通話建立，解析對端 RTP port + Contact URI
+     │──── ACK ────────────────▶│  Request-URI = Contact URI（RFC 3261 §12.2.1.1）
      │                          │
      │═══ RTP G.711 音訊流 ════▶│  每 20ms 一個 160-byte PCMU frame
-     │◀══ RTP G.711 音訊流 ═════│  計算 Jitter / 掉包 / MOS
+     │◀══ RTP G.711 音訊流 ═════│  計算 Jitter / 掉包 / MOS（RFC 3550 §A.3/§A.8）
      │                          │
      │──── BYE ────────────────▶│  通話持續時間計時結束，停止 RTP
      │◀─── 200 OK ──────────────│
      │
      │  （INVITE 逾時未收到回應時）
      │──── CANCEL ─────────────▶│  RFC 3261 §9
+     │
+     │  （收到 4xx/5xx/6xx 時）
+     │──── ACK ────────────────▶│  使用原始 INVITE branch（RFC 3261 §17.1.1.3）
 ```
 
 ---
@@ -433,21 +436,59 @@ npm run tauri dev   # 開啟視窗，hot-reload 前端
 ### `core/src/engine.rs`
 
 壓測主引擎（Tokio 非同步）：
-- **接收 task**：單一 UDP recv 迴圈，解析回應發至 channel
+- **接收 task**：單一 UDP recv 迴圈，以 `SipParser`（支援 compact form）解析回應並發至 channel
 - **進度 task**：每秒觸發 `on_progress` callback（TUI / GUI 更新）
 - **主控迴圈**：處理 SIP 事件 → 掃描逾時 → 依 CPS 發起新通話 → 判斷結束
-- RTP session 在收到 200 OK 後啟動，BYE 後停止並收集統計
+- RTP session 在收到 200 OK 後啟動（傳入 `pre_bound` 預分配 socket），BYE 後停止並收集統計
+- 2xx ACK 使用 Contact URI 作為 Request-URI；non-2xx ACK 使用原始 INVITE branch
 
 ### `core/src/sip/message.rs`
 
 手刻 SIP 訊息格式（不依賴外部 crate）：
-- `SipMessage::invite()` — 含 SDP，`m=audio PORT RTP/AVP 0` 使用預分配的本機 port
+- `SipMessage::invite()` — 含 SDP，`m=audio PORT RTP/AVP 0 8` 使用預分配的本機 port（同時列出 PCMU/PCMA）
+- `SipMessage::ack()` — 2xx ACK 使用 `contact_uri` 作為 Request-URI（RFC 3261 §12.2.1.1）；non-2xx ACK 使用原始 INVITE branch（RFC 3261 §17.1.1.3）
 - `SipMessage::cancel()` — RFC 3261 §9 CANCEL
-- `SipResponse::sdp_rtp_port()` — 從 200 OK body 解析對端 RTP port
+
+### `core/src/sip/parser.rs`
+
+`SipParser` struct 提供所有 SIP header 解析，**完整支援 RFC 3261 Compact Form**（縮寫 header 名稱）：
+
+| Compact | 標準 | 用途 |
+|---------|------|------|
+| `i:` | `Call-ID:` | 識別對話 |
+| `t:` | `To:` | 被叫方（含 to-tag） |
+| `f:` | `From:` | 主叫方（含 from-tag） |
+| `m:` | `Contact:` | 對端聯絡地址 |
+| `v:` | `Via:` | 傳輸路徑 |
+| `l:` | `Content-Length:` | Body 長度 |
+
+主要方法：
+- `call_id()` — 支援 `i:` 縮寫，確保高負載下能正確識別每通通話
+- `contact_uri()` — 從 Contact header 剝除角括號與參數，取出純 SIP URI（供 ACK/BYE 作為 Request-URI）
+- `sdp_rtp_port()` — 從 200 OK SDP body 解析對端 RTP port（`m=audio PORT RTP/AVP ...`）
 
 ### `core/src/rtp/session.rs`
 
-動態 port 分配（從 `rtp_base_port` 掃描 4000 個偶數 port），**在送出 INVITE 之前**就分配好本機 port 並寫入 SDP，收到 200 OK 後才真正啟動 RTP。
+**TOCTOU 競態消除**：RTP port 在送出 INVITE 前就以 `UdpSocket::bind()` 預佔並保持綁定，收到 200 OK 後直接移交給 `RtpSession::start()`，完全避免「bind → release → rebind」之間的 race window：
+
+```
+engine 主控迴圈（送 INVITE 前）:
+  (port, socket) = RtpSession::allocate_port(counter, local_ip).await
+  pre_bound_rtp.insert(call_id, socket)    ← socket 持續綁定
+
+engine 主控迴圈（收到 200 OK 後）:
+  socket = pre_bound_rtp.remove(call_id)   ← 取出已綁定 socket
+  RtpSession::start(cfg, counter, Some(socket))  ← 傳入 pre_bound，直接 connect 對端
+```
+
+`allocate_port()` 回傳 `(u16, UdpSocket)`（port 號 + 已綁定 socket），確保從分配到啟動期間 port 不被系統回收。
+
+### `core/src/rtp/stats.rs`
+
+RTP 品質統計，所有計算均符合 RFC 3550 標準：
+- **Jitter**（RFC 3550 §A.8）：EWMA 指數加權移動平均，8kHz clock 單位
+- **掉包率**（RFC 3550 §A.3）：以序號空間計算，追蹤 `first_seq`、`max_seq`、`seq_cycles`（wrap-around 計數），確保長時通話中序號回繞仍能正確統計 `expected` 封包數
+- **MOS**（ITU-T E-Model G.107）：由掉包率與 Jitter 估算 G.711 通話品質分數（1.0 ~ 5.0）
 
 ### `gui/src-tauri/src/commands.rs`
 
