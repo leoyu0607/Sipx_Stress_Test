@@ -97,7 +97,8 @@ pub struct Args {
     #[arg(long = "rtp-port", default_value_t = 10000)]
     pub rtp_base_port: u16,
 
-    /// 音檔路徑（.wav 或 .raw G.711 μ-law；未指定則靜音）
+    /// 音檔路徑（自動轉換為 G.711A/PCMA 送出）
+    /// 支援：.wav（PCM16/A-law/μ-law）、.ul/.ulaw（raw μ-law）、.al/.alaw（raw A-law）
     #[arg(long = "audio")]
     pub audio_file: Option<std::path::PathBuf>,
 

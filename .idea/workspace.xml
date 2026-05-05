@@ -17,10 +17,16 @@
     </cargoProject>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="85702eed-47e3-4cc2-8831-bbca1be3dbbc" name="Changes" comment="Add initial project structure and core modules for SIP stress testing">
-      <change beforePath="$PROJECT_DIR$/.gitignore" beforeDir="false" afterPath="$PROJECT_DIR$/.gitignore" afterDir="false" />
+    <list default="true" id="85702eed-47e3-4cc2-8831-bbca1be3dbbc" name="Changes" comment="Update configuration for SIP stress testing and add .claude to .gitignore">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/Cargo.lock" beforeDir="false" afterPath="$PROJECT_DIR$/Cargo.lock" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/cli/src/args.rs" beforeDir="false" afterPath="$PROJECT_DIR$/cli/src/args.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/core/src/engine.rs" beforeDir="false" afterPath="$PROJECT_DIR$/core/src/engine.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/core/src/rtp/audio.rs" beforeDir="false" afterPath="$PROJECT_DIR$/core/src/rtp/audio.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/core/src/rtp/session.rs" beforeDir="false" afterPath="$PROJECT_DIR$/core/src/rtp/session.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/core/src/sip/message.rs" beforeDir="false" afterPath="$PROJECT_DIR$/core/src/sip/message.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/core/src/stats.rs" beforeDir="false" afterPath="$PROJECT_DIR$/core/src/stats.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/gui/src/components/RightPanel.vue" beforeDir="false" afterPath="$PROJECT_DIR$/gui/src/components/RightPanel.vue" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/gui/src/stores/testStore.ts" beforeDir="false" afterPath="$PROJECT_DIR$/gui/src/stores/testStore.ts" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -81,7 +87,7 @@
     &quot;org.rust.first.attach.projects&quot;: &quot;true&quot;,
     &quot;settings.editor.selected.configurable&quot;: &quot;language.rust.cargo.check&quot;,
     &quot;to.speed.mode.migration.done&quot;: &quot;true&quot;,
-    &quot;ts.external.directory.path&quot;: &quot;C:\\Users\\leozh\\Sipx_Stress_Test\\sipress\\gui\\node_modules\\typescript\\lib&quot;,
+    &quot;ts.external.directory.path&quot;: &quot;C:\\Users\\leozh\\Sipx_Stress_Test\\sipress\\.claude\\worktrees\\optimistic-jackson-98d85d\\gui\\node_modules\\typescript\\lib&quot;,
     &quot;vue.rearranger.settings.migration&quot;: &quot;true&quot;
   }
 }</component>
@@ -125,7 +131,8 @@
       <workItem from="1777559999622" duration="789000" />
       <workItem from="1777560910099" duration="12778000" />
       <workItem from="1777624094018" duration="8838000" />
-      <workItem from="1777865286728" duration="1283000" />
+      <workItem from="1777865286728" duration="4917000" />
+      <workItem from="1777885379381" duration="1903000" />
     </task>
     <task id="LOCAL-00001" summary="Add initial project structure and core modules for SIP stress testing">
       <option name="closed" value="true" />
@@ -135,7 +142,15 @@
       <option name="project" value="LOCAL" />
       <updated>1777578103121</updated>
     </task>
-    <option name="localTasksCounter" value="2" />
+    <task id="LOCAL-00002" summary="Update configuration for SIP stress testing and add .claude to .gitignore">
+      <option name="closed" value="true" />
+      <created>1777866774962</created>
+      <option name="number" value="00002" />
+      <option name="presentableId" value="LOCAL-00002" />
+      <option name="project" value="LOCAL" />
+      <updated>1777866774962</updated>
+    </task>
+    <option name="localTasksCounter" value="3" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -154,7 +169,8 @@
   </component>
   <component name="VcsManagerConfiguration">
     <MESSAGE value="Add initial project structure and core modules for SIP stress testing" />
-    <option name="LAST_COMMIT_MESSAGE" value="Add initial project structure and core modules for SIP stress testing" />
+    <MESSAGE value="Update configuration for SIP stress testing and add .claude to .gitignore" />
+    <option name="LAST_COMMIT_MESSAGE" value="Update configuration for SIP stress testing and add .claude to .gitignore" />
   </component>
   <component name="github-copilot-workspace">
     <instructionFileLocations>

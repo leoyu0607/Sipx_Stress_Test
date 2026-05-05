@@ -18,6 +18,8 @@ pub struct LiveStats {
     pub calls_timeout:   AtomicU64,
     /// 目前進行中的通話（INVITE sent 到 completed/failed/timeout）
     pub calls_active:    std::sync::atomic::AtomicI64,
+    /// 目前活躍的 RTP session 數（用於前端顯示 RTP 狀態）
+    pub rtp_sessions:    AtomicU64,
 }
 
 impl LiveStats {
@@ -40,6 +42,13 @@ impl LiveStats {
         self.calls_timeout.fetch_add(1, Ordering::Relaxed);
         self.calls_active.fetch_sub(1, Ordering::Relaxed);
     }
+    pub fn on_rtp_start(&self) { self.rtp_sessions.fetch_add(1, Ordering::Relaxed); }
+    pub fn on_rtp_stop(&self)  {
+        // 防止下溢
+        let _ = self.rtp_sessions.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+            if v > 0 { Some(v - 1) } else { Some(0) }
+        });
+    }
 
     /// 快照（用於進度回報 / TUI 更新）
     pub fn snapshot(&self) -> StatsSnapshot {
@@ -49,6 +58,7 @@ impl LiveStats {
         let failed     = self.calls_failed.load(Ordering::Relaxed);
         let timeout    = self.calls_timeout.load(Ordering::Relaxed);
         let active     = self.calls_active.load(Ordering::Relaxed).max(0) as u64;
+        let rtp        = self.rtp_sessions.load(Ordering::Relaxed);
 
         let asr = if initiated > 0 {
             answered as f64 / initiated as f64 * 100.0
@@ -68,6 +78,7 @@ impl LiveStats {
             calls_failed:     failed,
             calls_timeout:    timeout,
             calls_concurrent: active,
+            rtp_sessions:     rtp,
             asr,
             error_rate,
         }
@@ -85,6 +96,8 @@ pub struct StatsSnapshot {
     pub calls_timeout:    u64,
     /// 目前進行中通話數
     pub calls_concurrent: u64,
+    /// 目前活躍的 RTP session 數（> 0 表示音訊傳送中）
+    pub rtp_sessions:     u64,
     /// Answer Seizure Ratio（%）
     pub asr: f64,
     /// Error Rate = (failed + timeout) / initiated × 100（%）

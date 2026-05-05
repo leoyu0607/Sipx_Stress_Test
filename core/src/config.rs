@@ -2,6 +2,31 @@
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
+/// 壓測模式：民眾端（主動撥出）vs 座席端（接聽）
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Mode {
+    /// 民眾端：壓測程式主動發 INVITE
+    Caller,
+    /// 座席端：模擬 SIP 話機，REGISTER 後等待來電並自動接聽
+    Agent,
+}
+
+impl Default for Mode {
+    fn default() -> Self {
+        Self::Caller
+    }
+}
+
+/// 座席帳號
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AgentAccount {
+    pub extension: String,
+    pub username:  String,
+    pub password:  String,
+    pub domain:    String,
+}
+
 /// 傳輸層協定
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -81,6 +106,15 @@ pub struct Config {
 
     /// 總通話上限（None = 不限，依 duration_secs 決定結束）
     pub max_total_calls: Option<u64>,
+
+    // ── Agent 模式 ─────────────────────────────────────────────────
+    /// 壓測模式（預設 Caller）
+    #[serde(default)]
+    pub mode: Mode,
+
+    /// 座席帳號列表（Agent 模式必填，Caller 模式忽略）
+    #[serde(default)]
+    pub agent_accounts: Vec<AgentAccount>,
 }
 
 impl Default for Config {
@@ -104,6 +138,8 @@ impl Default for Config {
             audio_file:           None,
             enable_rtp:           false,
             max_total_calls:      None,
+            mode:                 Mode::Caller,
+            agent_accounts:       Vec::new(),
         }
     }
 }

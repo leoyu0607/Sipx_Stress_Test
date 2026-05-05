@@ -322,6 +322,7 @@ function statusLabel(s: string) {
             <span class="reg-label">已註冊</span>
           </div>
           <div style="display:flex;gap:4px">
+            <button class="btn btn-sm" @click="store.registerAll()" title="重新對所有未註冊帳號發 REGISTER">重新註冊</button>
             <button class="btn btn-sm" @click="store.exportAccountsCsv()">匯出 CSV</button>
             <button class="btn btn-sm" style="color:var(--danger)" @click="store.clearAccounts()">清除全部</button>
           </div>

@@ -1,8 +1,10 @@
 /// Tauri commands：前端 ↔ core 橋接層
 use sipress_core::{
-    config::Config,
+    agent_engine::AgentEngine,
+    config::{Config, Mode},
     engine::{Engine, ProgressCallback},
     html_reporter::HtmlReporter,
+    registrar::{register_once, RegisterResult},
     stats::{FinalReport, StatsSnapshot},
 };
 use std::sync::{Arc, Mutex};
@@ -51,22 +53,33 @@ pub async fn start_test(
         *state_cb.snapshot.lock().unwrap() = Some(snap);
     });
 
+    let mode = config.mode.clone();
     tokio::spawn(async move {
-        let engine = Engine::new(config);
-        tokio::select! {
-            result = engine.run(Some(on_progress)) => {
-                match result {
-                    Ok(report) => {
-                        *state.report.lock().unwrap() = Some(report);
-                    }
-                    Err(e) => {
-                        tracing::error!("Engine 錯誤: {}", e);
+        let result = match mode {
+            Mode::Caller => {
+                let engine = Engine::new(config);
+                tokio::select! {
+                    r = engine.run(Some(on_progress)) => r,
+                    _ = stop_rx.recv() => {
+                        tracing::info!("壓測被手動停止");
+                        return;
                     }
                 }
             }
-            _ = stop_rx.recv() => {
-                tracing::info!("壓測被手動停止");
+            Mode::Agent => {
+                let engine = AgentEngine::new(config);
+                tokio::select! {
+                    r = engine.run(Some(on_progress)) => r,
+                    _ = stop_rx.recv() => {
+                        tracing::info!("座席壓測被手動停止");
+                        return;
+                    }
+                }
             }
+        };
+        match result {
+            Ok(report) => *state.report.lock().unwrap() = Some(report),
+            Err(e)     => tracing::error!("Engine 錯誤: {}", e),
         }
     });
 
@@ -102,6 +115,31 @@ pub fn get_report(
     state: State<'_, Arc<AppState>>,
 ) -> Option<FinalReport> {
     state.report.lock().unwrap().clone()
+}
+
+/// 對單一帳號發起 SIP REGISTER（含 Digest 認證重送），回傳結果
+/// 前端在新增帳號後立即呼叫
+#[tauri::command]
+pub async fn register_account(
+    server:    String,
+    domain:    Option<String>,
+    username:  String,
+    password:  String,
+    expires:   Option<u32>,
+    transport: Option<String>,
+) -> Result<RegisterResult, String> {
+    let dom_owned = domain
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| {
+            // 沒指定 domain → 取 server 的 IP 部分
+            server.split(':').next().unwrap_or(&server).to_string()
+        });
+    let tp = transport.unwrap_or_else(|| "UDP".into());
+    let exp = expires.unwrap_or(3600);
+
+    register_once(&server, &dom_owned, &username, &password, exp, &tp)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// 產生 HTML 報告字串（前端負責下載或開啟）

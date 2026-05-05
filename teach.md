@@ -18,12 +18,15 @@
 12. [core — RTP 品質統計 rtp/stats.rs](#12-core--rtp-品質統計-rtpstatsrs)
 13. [core — 報告輸出 reporter.rs & html_reporter.rs](#13-core--報告輸出-reporterrs--html_reporterrs)
 14. [core — SIP 日誌 sip_logger.rs](#14-core--sip-日誌-sip_loggerrs)
-15. [cli — 命令列介面](#15-cli--命令列介面)
-16. [gui — Tauri 後端 commands.rs & lib.rs](#16-gui--tauri-後端-commandsrs--librs)
-17. [gui — 前端狀態管理 testStore.ts](#17-gui--前端狀態管理-teststorets)
-18. [gui — Vue 元件樹](#18-gui--vue-元件樹)
-19. [建置系統 build.ps1 / build.sh](#19-建置系統-buildps1--buildsh)
-20. [關鍵設計決策與注意事項](#20-關鍵設計決策與注意事項)
+15. [core — REGISTER / Digest auth sip/register.rs](#15-core--register--digest-auth-sipregisterrs)
+16. [core — 一次性註冊器 registrar.rs](#16-core--一次性註冊器-registrarrs)
+17. [core — 座席引擎 agent_engine.rs](#17-core--座席引擎-agent_enginers)
+18. [cli — 命令列介面](#18-cli--命令列介面)
+19. [gui — Tauri 後端 commands.rs & lib.rs](#19-gui--tauri-後端-commandsrs--librs)
+20. [gui — 前端狀態管理 testStore.ts](#20-gui--前端狀態管理-teststorets)
+21. [gui — Vue 元件樹](#21-gui--vue-元件樹)
+22. [建置系統 build.ps1 / build.sh](#22-建置系統-buildps1--buildsh)
+23. [關鍵設計決策與注意事項](#23-關鍵設計決策與注意事項)
 
 ---
 
@@ -81,6 +84,15 @@ tokio = { version = "1", features = ["full"] }
 2. 從 GUI 前端 JSON（透過 Tauri `invoke`）反序列化傳入
 
 ```rust
+pub enum Mode { Caller, Agent }
+
+pub struct AgentAccount {
+    pub extension: String,
+    pub username:  String,
+    pub password:  String,
+    pub domain:    String,
+}
+
 pub struct Config {
     pub server_addr:          String,       // "ip:port"
     pub cps:                  f64,          // calls per second
@@ -91,6 +103,8 @@ pub struct Config {
     pub max_total_calls:      Option<u64>,  // None = unlimited
     pub enable_rtp:           bool,
     pub audio_file:           Option<PathBuf>,
+    pub mode:                 Mode,         // Caller / Agent
+    pub agent_accounts:       Vec<AgentAccount>,
     // ...
 }
 ```
@@ -100,6 +114,9 @@ pub struct Config {
 - `max_total_calls = None` 表示不限通數，搭配 `duration_secs` 決定結束時機
 - 兩者皆為「不限」時，測試必須手動停止（GUI: Stop 按鈕；CLI: Ctrl-C）
 - `call_duration_secs = 0` 表示不主動送 BYE，通話由伺服器端掛斷
+- `mode` 由 GUI 在 Sidebar 分頁切換；Caller 使用 `Engine`、Agent 使用 `AgentEngine`
+- `agent_accounts` 在 Caller 模式被忽略；Agent 模式下若為空 engine 會直接 bail
+- `Mode` 與 `AgentAccount` 都標 `#[serde(default)]`，舊版 JSON 不含這兩欄也能反序列化
 
 ---
 
@@ -192,15 +209,44 @@ o=sipress 1000 1000 IN IP4 {local_ip}
 s=sipress
 c=IN IP4 {local_ip}
 t=0 0
-m=audio {rtp_port} RTP/AVP 0 8
-a=rtpmap:0 PCMU/8000
+m=audio {rtp_port} RTP/AVP 8
 a=rtpmap:8 PCMA/8000
+a=ptime:20
 a=sendrecv
 ```
 
 **SDP 中的 RTP port**：
 - 若啟用 RTP：填入預先分配好的本機偶數 port（例如 `10000`）
 - 若未啟用 RTP：填入 `9`（SDP RFC 規定 port=9 表示媒體流被停用）
+
+**SDP 為何只 offer PCMA（PT=8），不 offer PCMU（PT=0）？**
+過去版本 offer `RTP/AVP 0 8`（同時提供 μ-law 與 A-law），按 SDP RFC 第一個 codec 為主，伺服器通常會選 PCMU。但實際對部分 SIP 軟交換機（要求 PCMA）會造成音訊不正確。改成只 offer PCMA 後，audio.rs 端也統一把所有音檔轉成 A-law（見 §9）。
+
+### 對伺服器主動請求的 200 OK 鏡射
+
+引擎收到伺服器發來的 `RE-INVITE`（Session-Expires 保活）或 `BYE` 時，必須鏡射對方的 Via / From / To / Call-ID / CSeq 標頭回 200 OK。`SipMessage` 提供：
+
+```rust
+SipMessage::ok_for_server_bye(raw_request) -> String
+SipMessage::ok_for_server_reinvite(raw_request, local_addr, rtp_port) -> String
+```
+
+私有 helper `extract_request_headers()` 從 raw 訊息逐行抓取上述標頭（多行 Via 用 `\r\n` 串接保留）。RE-INVITE 的版本會額外附 SDP，sip body 同 INVITE 規格（PCMA-only）。
+
+### SDP 解析的關鍵修正：sdp_rtp_addr()
+
+過去 `SipResponse::sdp_rtp_port()` 只取 `m=audio PORT`，把 RTP 對端 IP **誤用 SIP server IP**。實際上交換機可能把媒體流路由到不同 IP（媒體閘道 / SBC），必須讀 SDP 的 `c=` 行：
+
+```rust
+pub fn sdp_rtp_addr(raw: &str, fallback_ip: &str) -> Option<String> {
+    // 1. 掃 session-level c= IN IP4 <ip>
+    // 2. 進入 m=audio 區塊後，再用 media-level c= 覆蓋
+    // 3. 取 m=audio PORT
+    // 4. 回傳 "ip:port"，若 c= 缺失或為 0.0.0.0 則用 fallback_ip
+}
+```
+
+舊版 `sdp_rtp_port()` 仍保留供向下相容。
 
 ### 唯一識別碼生成
 
@@ -364,7 +410,7 @@ tokio::spawn ─── Task 2：進度回報（每秒）
 - 用 `tokio::Mutex` 而非 `std::sync::Mutex`，在 `.await` 期間可以釋放 lock
 - 單一主控迴圈避免了 race condition
 
-### Task 1：接收迴圈
+### Task 1：接收迴圈（區分回應與請求）
 
 ```rust
 tokio::spawn(async move {
@@ -372,13 +418,37 @@ tokio::spawn(async move {
     loop {
         let n = udp_recv.socket.recv(&mut buf).await?;
         let raw = String::from_utf8_lossy(&buf[..n]).into_owned();
-        // 解析 → 送 SipEvent 到 channel
-        let _ = ev_tx2.send(SipEvent::Response { call_id, code, ... });
+
+        if raw.starts_with("SIP/2.0") {
+            // SIP 回應 → SipEvent::Response
+            let _ = ev_tx2.send(SipEvent::Response { call_id, code, ... });
+        } else {
+            // SIP 請求（伺服器主動：RE-INVITE / BYE）→ SipEvent::IncomingRequest
+            let method = raw.lines().next().and_then(|l| l.split_whitespace().next())...;
+            if method == "INVITE" || method == "BYE" {
+                let _ = ev_tx2.send(SipEvent::IncomingRequest { call_id, method, raw });
+            }
+        }
     }
 });
 ```
 
 接收 task 只做最少的工作（解析狀態碼、Call-ID），不修改任何共享狀態，所有狀態更新都透過 channel 傳回主控迴圈。
+
+### SipEvent 的兩個變體
+
+```rust
+enum SipEvent {
+    Response { call_id, code, to_tag, method, remote_rtp_addr },
+    IncomingRequest { call_id, method, raw },  // 伺服器主動發來的請求
+}
+```
+
+主控迴圈用 `match ev { ... }` 分派：
+- `Response` 走原本的狀態機（100/180/200/4xx-6xx）
+- `IncomingRequest` 對 `INVITE` 回 `200 OK + SDP`（保活）；對 `BYE` 回 `200 OK` 並把 dialog 標記為 Completed
+
+**為什麼一定要回 RE-INVITE？** 軟交換機常用 SIP Session-Expires (RFC 4028) 機制定期送 RE-INVITE 確認對方還活著。過去版本的 sipress 完全忽略這些請求，導致 ~9 秒後伺服器砍掉通話 → 接通通話被縮短，錄音檔只有開頭。
 
 ### Task 2：進度回報
 
@@ -460,18 +530,34 @@ time::sleep(Duration::from_micros(500)).await;
 
 ## 9. core — RTP 音訊 rtp/audio.rs
 
-`AudioSource` 負責從音檔讀取並輸出 G.711 µ-law frames：
+`AudioSource` 負責**自動把任意輸入音檔轉成 G.711A（PCMA, PT=8）**並切成 160-byte frames（20ms @ 8kHz）：
 
 ```
-WAV (PCM16) ──▶ 重採樣至 8kHz ──▶ µ-law 編碼 ──▶ 160-byte frames（20ms @ 8kHz）
-RAW / PCM µ-law ──▶ 直接使用
+.wav format=1  PCM16  → linear_to_alaw()        ──┐
+.wav format=6  A-law  → 直接讀取                  ├─→ 160-byte PCMA frames
+.wav format=7  μ-law  → ulaw_to_linear → A-law    │   ─→ 循環播放
+.al / .alaw    raw    → 直接讀取                  │
+.ul / .ulaw    raw    → ulaw_bytes_to_alaw()    ──┘
 ```
 
-**WAV 解析**：使用 `hound` crate 讀取 PCM16。若取樣率不是 8kHz，進行線性重採樣。
+`AudioSource` 結構：
+
+```rust
+pub struct AudioSource {
+    frames: Vec<Vec<u8>>,    // 預先切好的 160-byte PCMA frames
+    cursor: usize,
+    pub looping: bool,
+    pub payload_type: u8,    // 固定 8（PCMA），供 RtpSession 使用
+}
+```
+
+**WAV 解析的注意點**：A-law 的 fmt chunk 通常是 18 bytes（不是 PCM 的 16 bytes）；解析必須用 chunk-scan 邏輯（找到 `fmt ` chunk 後讀其長度），不能用固定偏移。
 
 **循環播放**：`next_frame()` 到達結尾後回到頭部，確保長時間測試持續有音訊輸出。
 
-**靜音模式**：`AudioSource::silence()` 回傳全零的 frames，仍然送出 RTP 封包（正確的 silence suppression 模擬）。
+**靜音模式**：`AudioSource::silence()` 回傳填滿 `0xD5`（A-law 零位準）的 frames，PT=8。仍然送出 RTP 封包以維持媒體流時序。
+
+**為何全部統一 PCMA？** 見 §5 中的 SDP offer 章節。簡言之：SDP 只 offer PCMA，那麼傳送端也必須是 PCMA，否則 RTP 內容與 SDP 不一致。
 
 ---
 
@@ -496,10 +582,12 @@ sipress 使用：
 - `V=2`（版本 2）
 - `P=0, X=0, CC=0`（無 padding、無擴展、無 CSRC）
 - `M=0`（非語音開始）
-- `PT=0`（PCMU, G.711 µ-law）
+- `PT=8`（PCMA, G.711 A-law）— **改自舊版 PT=0 (PCMU)**，因部分軟交換機要求 A-law
 - `seq`：每封包 +1，初始值隨機（防止預測）
 - `ts`：每封包 +160（20ms × 8kHz），初始值隨機
 - `SSRC`：每個 RTP session 隨機產生
+
+**Payload Type 是怎麼決定的？** `RtpSession` 不再硬編碼 `PT_PCMU = 0`，而是從 `AudioSource::payload_type` 讀取（永遠是 8）。這層抽象讓未來支援其他 codec（G.722 / Opus）時不需要動 RTP 封包層。
 
 ---
 
@@ -675,7 +763,209 @@ logs/YYYYMMDD_HHMMSS_agent.sip.log
 
 ---
 
-## 15. cli — 命令列介面
+## 15. core — REGISTER / Digest auth sip/register.rs
+
+座席模式必備的兩塊功能：建構 REGISTER 訊息、處理 401/407 Digest challenge。
+
+### RegisterMessage::build()
+
+```rust
+pub fn build(
+    username, domain, server, local_addr,
+    cseq, branch, from_tag, call_id,
+    transport, expires,
+    auth_header: Option<&str>,   // 第一次 None；401 後 Some("Digest username=...")
+) -> String
+```
+
+包含 `Contact: <sip:user@local;transport=udp>;expires=N` 與 `Allow: ...,REGISTER`，否則部分軟交換機會拒絕。
+
+### DigestChallenge
+
+```rust
+pub struct DigestChallenge {
+    pub realm:     String,
+    pub nonce:     String,
+    pub algorithm: String,           // 通常 "MD5"
+    pub qop:       Option<String>,   // "auth" 或 None（RFC 2069 fallback）
+    pub opaque:    Option<String>,
+}
+```
+
+`parse(raw)` 從 401 / 407 回應的 `WWW-Authenticate` 或 `Proxy-Authenticate` 標頭擷取（含多行延續處理）。
+
+`build_authorization(user, pass, "REGISTER", uri)` 計算 MD5 response：
+
+```
+HA1 = MD5(username:realm:password)
+HA2 = MD5(method:uri)
+
+# qop=auth：RFC 2617 路徑
+response = MD5(HA1 : nonce : nc : cnonce : qop : HA2)
+
+# 無 qop：RFC 2069 fallback
+response = MD5(HA1 : nonce : HA2)
+```
+
+### split_quoted_csv()
+
+Digest header 內的 key=value 用逗號分隔，但 value 可能含引號包住的逗號（例：`qop="auth, auth-int"`）。簡易 state machine：遇到 `"` 切換 in_quote 狀態，僅在 `!in_quote` 時把 `,` 視為分隔符。
+
+### 單元測試
+
+`cargo test -p sipress-core` 覆蓋兩個案例：
+- `parse_digest_challenge`：從含 `WWW-Authenticate: Digest realm=..., nonce=..., qop="auth"` 的 raw response 解析回 `DigestChallenge`
+- `build_auth_response`：對給定 challenge 生出 Authorization 標頭，斷言含 `username="alice"` 與 `response="..."`
+
+---
+
+## 16. core — 一次性註冊器 registrar.rs
+
+`register_once()` 是給 GUI **新增帳號時即時驗證**用的：開短期 UDP socket → REGISTER → 收 401 → 重送帶 Authorization → 收 200 OK 或失敗 → 關 socket → 回傳結果。
+
+### 介面
+
+```rust
+pub async fn register_once(
+    server_addr, domain, username, password,
+    expires, transport,
+) -> Result<RegisterResult>
+
+pub struct RegisterResult {
+    pub status:       RegisterStatus,   // Registered / AuthFailed / Rejected / Timeout / NetworkError
+    pub message:      String,           // 給人看的描述
+    pub expires_secs: Option<u32>,      // 成功時伺服器同意的 Expires
+    pub sip_code:     Option<u16>,
+}
+```
+
+### recv_with_timeout 的細節
+
+```rust
+async fn recv_with_timeout(sock, dur) -> Result<String> {
+    loop {
+        let n = timeout(remaining, sock.recv(&mut buf)).await??;
+        let raw = ...;
+        let code = parse_status_code(&raw);
+        if (100..200).contains(&code) { continue; }   // 跳過 100/180 中繼回應
+        return Ok(raw);
+    }
+}
+```
+
+**為什麼要跳過 1xx？** 部分伺服器在處理 REGISTER 時也會回 100 Trying。若直接拿來解析狀態碼會誤判為失敗。這段邏輯確保只取最終回應。
+
+### 為何不直接重用引擎的 socket？
+
+新增帳號是 GUI 一次性操作；開引擎需要 Config + tokio runtime + 統計結構，太重。短期 socket 用完即關，乾淨利落。代價是：壓測時 `AgentEngine` 會再開一條新 socket 重新 REGISTER（不共用註冊狀態）。
+
+---
+
+## 17. core — 座席引擎 agent_engine.rs
+
+座席模式的核心，每個 `AgentAccount` 一個獨立 tokio task + 自帶 UDP socket。
+
+### 架構
+
+```
+AgentEngine::run()
+   │
+   ├── 為每個 account spawn task：account_runner()
+   │         │
+   │         ├── 開 UdpSocket + connect(server)
+   │         ├── 第一次 REGISTER（無認證）
+   │         │
+   │         └── tokio::select! 主迴圈：
+   │               ├── sock.recv() ─→ handle_response() / handle_request()
+   │               ├── re-register 計時器 ─→ 沿用快取 challenge 重送 REGISTER
+   │               └── stop.notified() ─→ REGISTER Expires=0 → break
+   │
+   ├── time::sleep(duration)
+   ├── stop_flag.notify_waiters()  // 通知所有 runner 解除註冊
+   ├── time::sleep(1 秒)            // 給 deregister 一些時間
+   └── 全部 abort + 產生 FinalReport
+```
+
+### RegState（per-account）
+
+```rust
+struct RegState {
+    cseq: u32,                          // REGISTER CSeq 累加
+    challenge: Option<DigestChallenge>, // 401 後快取，re-REGISTER 直接用不需再被 challenge
+}
+```
+
+`Arc<Mutex<RegState>>` 在主迴圈與計時 branch 共享。每次 REGISTER 都 `cseq += 1`。
+
+### handle_response：只關心 REGISTER 回應
+
+```rust
+match cseq_method {
+    Some("REGISTER") => match code {
+        200 => { registered = true; last_register_at = now; current_expires = parse_expires(...); }
+        401 | 407 => { 解析 challenge 並重送 REGISTER }
+        _ => { registered = false; log }
+    }
+    _ => return,  // BYE/INVITE 的回應在 caller 模式才需要，這裡是 UAS 不會主動發那些 dialog
+}
+```
+
+### handle_request：所有伺服器主動的請求
+
+| 方法 | 處理 |
+|------|------|
+| `INVITE`（新通話） | `live.on_invite()` → 100 Trying → 200 OK + SDP（PCMA）→ 在 dialogs 表中記錄 |
+| `INVITE`（已有 dialog） | RE-INVITE，視為保活，回 200 OK + SDP |
+| `ACK` | 不需回應 |
+| `BYE` | 200 OK + `live.on_completed()` + 從 dialogs 表移除 |
+| `CANCEL` | 200 OK（CANCEL）+ 487 Request Terminated（INVITE）+ `live.on_failed()` |
+| `OPTIONS` | 200 OK（健康檢查）|
+
+### build_response_with_sdp
+
+200 OK for INVITE 必須含 SDP 才能完成媒體協商：
+
+```rust
+fn build_response_with_sdp(raw_request, status_line, to_tag, local_addr, rtp_port) -> String {
+    let (via, from, to, call_id, cseq) = extract_request_headers_for_response(raw_request);
+    let to_with_tag = inject_to_tag_if_missing(&to, to_tag);
+    let sdp = "...m=audio {port} RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\n...";
+    // Contact 帶我們的本機 socket 地址，否則對方後續送 BYE 會找不到我們
+    format!("SIP/2.0 {status}\r\n{via}\r\n{from}\r\n{to_with_tag}\r\n...{sdp}")
+}
+```
+
+`inject_to_tag_if_missing` 處理一個 corner case：若伺服器送來的 INVITE 中 To 標頭沒有 tag（這是合法的，初次 INVITE 時 callee 還沒被指派 tag），我們得補上自己生成的 to_tag。
+
+### 目前的限制：RTP port 是假的
+
+```rust
+fn pick_dummy_rtp_port(_local_ip: &str) -> u16 {
+    rand::thread_rng().gen_range(16000..32000) | 1 → 偶數化
+}
+```
+
+只是隨機數字，沒有真的 bind。對方送來的 RTP 會 ICMP unreachable。SIP 信令本身可正常完成。Phase 3 會補上真實的 RTP socket 與音訊回送。
+
+### Stop 訊號與優雅退出
+
+```rust
+let stop_flag = Arc::new(tokio::sync::Notify::new());
+// 主任務：時間到後通知
+stop_flag.notify_waiters();
+time::sleep(1 秒).await;
+for h in handles { h.abort(); }
+```
+
+`Notify::notify_waiters()` 一次喚醒所有正在 `notified().await` 的 task。每個 runner 收到通知後會送 REGISTER Expires=0，再從主迴圈 break。1 秒等待是給網路 round-trip 的緩衝。
+
+### 為何用單 socket？
+
+每個帳號一個 UDP socket，比起「全部帳號共用一個 socket，按 To header 路由」簡單得多。代價是 N 個帳號就 N 個 socket，但對 100~1000 個座席而言完全沒問題（系統 fd 限制通常 1024+）。
+
+---
+
+## 18. cli — 命令列介面
 
 ### args.rs（clap 參數）
 
@@ -713,7 +1003,7 @@ struct Args {
 
 ---
 
-## 16. gui — Tauri 後端 commands.rs & lib.rs
+## 19. gui — Tauri 後端 commands.rs & lib.rs
 
 ### lib.rs — 應用入口
 
@@ -724,7 +1014,8 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .manage(Arc::new(AppState::default()))   // ← 必須
         .invoke_handler(tauri::generate_handler![
-            start_test, stop_test, get_snapshot, get_report, get_html_report
+            start_test, stop_test, get_snapshot, get_report, get_html_report,
+            register_account,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -753,7 +1044,7 @@ pub struct AppState {
 
 以 `Arc<AppState>` 包裝後 `.manage()`，讓每個 command 透過 `State<'_, Arc<AppState>>` 取得。
 
-### start_test Command
+### start_test Command（依 mode 分派）
 
 ```rust
 pub async fn start_test(
@@ -768,10 +1059,27 @@ pub async fn start_test(
         *state_cb.snapshot.lock().unwrap() = Some(snap);
     });
 
+    let mode = config.mode.clone();
     tokio::spawn(async move {
-        tokio::select! {
-            result = engine.run(Some(on_progress)) => { /* 儲存 report */ }
-            _ = stop_rx.recv() => { /* 正常停止 */ }
+        let result = match mode {
+            Mode::Caller => {
+                let engine = Engine::new(config);
+                tokio::select! {
+                    r = engine.run(Some(on_progress)) => r,
+                    _ = stop_rx.recv() => return,
+                }
+            }
+            Mode::Agent => {
+                let engine = AgentEngine::new(config);
+                tokio::select! {
+                    r = engine.run(Some(on_progress)) => r,
+                    _ = stop_rx.recv() => return,
+                }
+            }
+        };
+        match result {
+            Ok(report) => *state.report.lock().unwrap() = Some(report),
+            Err(e)     => tracing::error!("Engine 錯誤: {}", e),
         }
     });
 
@@ -780,6 +1088,26 @@ pub async fn start_test(
 ```
 
 `start_test` 立即回傳 `"started"`，引擎在背景 task 中執行。前端收到回傳後開始輪詢 `get_snapshot`。
+
+### register_account Command
+
+座席模式新增帳號時即時驗證用：
+
+```rust
+#[tauri::command]
+pub async fn register_account(
+    server, domain, username, password,
+    expires: Option<u32>,
+    transport: Option<String>,
+) -> Result<RegisterResult, String> {
+    // domain 為空時取 server IP 作 fallback
+    register_once(&server, &dom, &username, &password,
+                  expires.unwrap_or(3600), &transport.unwrap_or("UDP".into()))
+        .await.map_err(|e| e.to_string())
+}
+```
+
+回傳的 `RegisterResult` 含 status / message / expires_secs / sip_code，前端依 status 切換 badge 顏色。
 
 ### stop_test 的 MutexGuard 注意事項
 
@@ -820,7 +1148,7 @@ Tauri 2 採用明確權限模型，每個 window API 都必須在 `capabilities/
 
 ---
 
-## 17. gui — 前端狀態管理 testStore.ts
+## 20. gui — 前端狀態管理 testStore.ts
 
 ### Pinia Store 架構
 
@@ -921,7 +1249,7 @@ async function exportHtml() {
 
 ---
 
-## 18. gui — Vue 元件樹
+## 21. gui — Vue 元件樹
 
 ```
 App.vue
@@ -951,7 +1279,7 @@ App.vue
 
 ---
 
-## 19. 建置系統 build.ps1 / build.sh
+## 22. 建置系統 build.ps1 / build.sh
 
 ### 輸出路徑
 
@@ -983,15 +1311,20 @@ build script 從這些路徑複製到 `dist/`。
 
 ---
 
-## 20. 關鍵設計決策與注意事項
+## 23. 關鍵設計決策與注意事項
 
 ### A. 為什麼用 UDP 而非 TCP for SIP？
 
 預設使用 UDP，因為大多數中國電信軟交換機（SoftX3000、S8500 等）預設接受 UDP SIP。TCP 雖然更可靠，但 TCP 連線管理增加了壓測工具的複雜度，且在高 CPS 場景下 TCP 的 SYN 握手開銷更明顯。
 
-### B. 為什麼不實作 SIP 認證（401/407）？
+### B. SIP 認證（401/407）的實作策略
 
-sipress 設計為純壓測工具，假設測試 SIP 伺服器端已白名單測試來源 IP，或對測試 Trunk 停用認證。實作 MD5-AES Digest 認證會大幅增加複雜度，且多數壓測場景不需要。
+從 v0.2 起，**座席模式**完整實作 RFC 2617 Digest 認證（含 qop=auth 與 RFC 2069 fallback），因為座席必須帶帳密註冊到交換機。實作位於：
+- `core/src/sip/register.rs` — challenge 解析 + response 計算
+- `core/src/registrar.rs` — 一次性 REGISTER（GUI 新增帳號用）
+- `core/src/agent_engine.rs` — 持續性 REGISTER（壓測時每帳號一個 task）
+
+**民眾模式（Caller）依然不帶 INVITE 認證**。原因：壓測場景下，測試 SIP 伺服器端通常會將測試來源 IP 加入白名單；INVITE 帶 Digest 會大幅增加每通通話的訊息往返（每通要多 2 條訊息），影響最高 CPS。需要時可在 engine.rs 加入「收到 401/407 自動重送 INVITE 帶 Authorization」的邏輯，沿用 `register.rs` 中的 `DigestChallenge`。
 
 ### C. AtomicU64 vs Mutex 的選擇
 
@@ -1043,6 +1376,24 @@ RTP 每個 Session 有兩個 tokio task stack（預設 2MB 每 task），但 tok
 2. UDP 封包的系統呼叫開銷
 3. RTP 音訊解碼（啟用音檔時）
 
+### I. 座席模式為何每帳號獨立 socket？
+
+替代方案是「全部帳號共用一個 SIP socket，依 To header 的 username 把進來的 INVITE 路由到對應的 dialog」。但：
+
+- **REGISTER 與後續的 INVITE Contact 標頭一致性**：每個帳號 REGISTER 時的 Contact 必須是「我的可達地址」。共用 socket 的話所有帳號共用同一個 `ip:port`，理論上可行，但大部分 SBC / 軟交換機會懷疑這種行為。
+- **dialog 清晰度**：每帳號獨立 socket = 每帳號獨立的 SIP UA，內部狀態彼此完全隔離，debug 容易。
+- **代價**：N 個帳號 = N 個 fd。Linux 預設 1024 fd，1000 個座席仍在範圍內；超過時可 `ulimit -n` 提升。
+
+### J. AgentEngine 為何不真實處理 RTP？
+
+Phase 2 暫時略過 RTP 收/送，原因：
+
+1. SIP 信令層的負載比 RTP 重得多（每通通話只有幾 KB SIP 訊息，但每秒有 50 個 RTP 封包）
+2. 座席壓測的核心問題是「同時可註冊多少座席」「來電分配（ACD）的延遲」，這些都在 SIP 層解決
+3. 真實 RTP 需要為每個進行中的通話 bind 一個 UDP port，與民眾模式的 `RtpSession::allocate_port()` 邏輯類似但又不完全相同（座席是 UAS，port 寫在 200 OK 而非 INVITE）
+
+Phase 3 計畫補上：每個 dialog 啟動 `RtpSession`，可選擇回送靜音 / 預錄音檔，並收集 MOS 等品質指標。
+
 ---
 
 ## 附錄：常見錯誤與排查
@@ -1057,6 +1408,10 @@ RTP 每個 Session 有兩個 tokio task stack（預設 2MB 每 task），但 tok
 | GUI 顯示空白 | Tauri WebView 設定問題 | 刪除 `%APPDATA%\com.leozh.sipress` 重啟 |
 | 視窗無法拖曳/最小化 | Tauri capabilities 缺少 window 權限 | 確認 `capabilities/default.json` 有 `core:window:allow-*` |
 | 所有通話 408 Timeout | 伺服器不可達（這是正確行為） | 確認 SIP 伺服器地址正確且防火牆開放 |
+| 座席帳號註冊一直 ERR (401) | 密碼錯 / Digest 計算對不上 | 確認密碼大小寫；查 SIP log 中 `WWW-Authenticate` 格式是否標準 |
+| 接通的通話幾秒被砍 | 過去版本忽略 RE-INVITE 導致伺服器砍 dialog | 已修補；查 SIP log 確認有 `回應 200 OK` 的 RE-INVITE 紀錄 |
+| 民眾模式錄音檔只有開頭 | 同上（Session-Expires 沒回應）| 已修補；如還發生請貼 SIP log 上來 |
+| 座席模式按開始跑成民眾模式 | Config 沒帶 `mode` 欄位 | 已修補；確認 `buildRustConfig()` 有 `mode: c.mode` |
 
 ---
 

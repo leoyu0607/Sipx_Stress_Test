@@ -1,55 +1,68 @@
 /// 音檔讀取與 G.711 編碼
-/// 支援：
-///   - WAV（8kHz/16kHz mono PCM16，自動重新取樣至 8kHz）
-///   - raw G.711 μ-law（直接使用）
-/// 輸出：循環播放的 160-byte（20ms @ 8kHz）G.711 PCMU 封包流
+/// 支援輸入格式（全部自動轉換為 G.711A / PCMA / PT=8 輸出）：
+///   - WAV PCM16（8kHz/16kHz mono/stereo，自動重新取樣至 8kHz）
+///   - WAV A-law（format=6，直接使用原始 bytes）
+///   - WAV μ-law（format=7，decode → A-law 重新編碼）
+///   - raw G.711 μ-law（.ul/.ulaw/.pcmu）→ decode → A-law 重新編碼
+///   - raw G.711 A-law（.al/.alaw/.pcma）→ 直接使用
+/// 輸出：循環播放的 160-byte（20ms @ 8kHz）G.711A（PCMA，PT=8）封包流
 
 use anyhow::{bail, Context, Result};
 use std::{fs, path::Path};
 
-/// 音訊來源（已解碼為 G.711 PCMU bytes，可循環）
+/// 音訊來源（已解碼為 G.711 bytes，可循環）
 pub struct AudioSource {
     /// 所有 frames（每個 frame = 160 bytes = 20ms）
-    frames:      Vec<Vec<u8>>,
+    frames:          Vec<Vec<u8>>,
     /// 目前播放位置
-    cursor:      usize,
+    cursor:          usize,
     /// 是否循環播放
-    pub looping: bool,
+    pub looping:     bool,
+    /// RTP Payload Type：0 = PCMU，8 = PCMA
+    pub payload_type: u8,
 }
 
 impl AudioSource {
-    /// 從檔案載入（自動偵測格式）
+    /// 從檔案載入（自動偵測格式，統一輸出 G.711A PCMA PT=8）
     pub fn from_file(path: &Path) -> Result<Self> {
         let ext = path.extension()
             .and_then(|e| e.to_str())
             .map(|s| s.to_lowercase())
             .unwrap_or_default();
 
-        let pcmu_bytes = match ext.as_str() {
-            "wav"  => Self::load_wav(path)?,
-            "ul"   |
-            "ulaw" |
-            "pcmu" |
-            "raw"  => {
-                // 直接讀取 raw G.711 μ-law
-                fs::read(path).with_context(|| format!("無法讀取音檔: {}", path.display()))?
+        let bytes = match ext.as_str() {
+            "wav" => {
+                // WAV 自動偵測 format，統一轉成 G.711A
+                Self::load_wav_to_pcma(path)?
             }
-            other => bail!("不支援的音檔格式: .{}（支援 .wav / .raw / .ul）", other),
+            // raw G.711 μ-law → 轉 A-law
+            "ul" | "ulaw" | "pcmu" | "raw" => {
+                let raw = fs::read(path)
+                    .with_context(|| format!("無法讀取音檔: {}", path.display()))?;
+                Self::ulaw_bytes_to_alaw(raw)
+            }
+            // raw G.711 A-law → 直接使用
+            "al" | "alaw" | "pcma" => {
+                fs::read(path)
+                    .with_context(|| format!("無法讀取音檔: {}", path.display()))?
+            }
+            other => bail!("不支援的音檔格式: .{}（支援 .wav / .ul / .ulaw / .al / .alaw / .raw）", other),
         };
 
-        let frames = Self::split_frames(pcmu_bytes);
+        let frames = Self::split_frames(bytes);
         if frames.is_empty() {
             bail!("音檔內容為空或太短（最少需要 160 bytes / 20ms）");
         }
 
-        Ok(Self { frames, cursor: 0, looping: true })
+        // 永遠使用 PT=8（G.711A PCMA），與 SDP offer 一致
+        Ok(Self { frames, cursor: 0, looping: true, payload_type: 8 })
     }
 
-    /// 產生靜音來源（用於不提供音檔時）
+    /// 產生靜音來源（G.711A PCMA 靜音，PT=8）
     pub fn silence() -> Self {
-        // 20ms 靜音 = 160 個 PCMU 靜音值（0xFF = G.711 μ-law 零電平）
-        let frame = vec![0xFFu8; 160];
-        Self { frames: vec![frame; 50], cursor: 0, looping: true }
+        // G.711A 零電平 = 0xD5（linear 0 → A-law 編碼）
+        let frame = vec![0xD5u8; 160];
+        Self { frames: vec![frame; 50], cursor: 0, looping: true, payload_type: 8 }
     }
 
     /// 取得下一個 20ms frame（160 bytes）
@@ -82,18 +95,17 @@ impl AudioSource {
         self.frames.len() as f64 * 0.020
     }
 
-    // ── 私有：WAV 解析 ────────────────────────────────────────────
+    // ── 私有：WAV 解析（統一輸出 G.711A PCMA bytes）──────────────
 
-    fn load_wav(path: &Path) -> Result<Vec<u8>> {
+    /// 載入 WAV 並轉換為 G.711A（PCMA）bytes
+    /// 支援 WAV format=1（PCM）、6（A-law）、7（μ-law），自動重新取樣至 8kHz
+    fn load_wav_to_pcma(path: &Path) -> Result<Vec<u8>> {
         let data = fs::read(path)
             .with_context(|| format!("無法讀取 WAV 檔案: {}", path.display()))?;
 
-        // 最小 WAV header = 44 bytes
         if data.len() < 44 {
             bail!("WAV 檔案過小（< 44 bytes）");
         }
-
-        // RIFF chunk
         if &data[0..4] != b"RIFF" {
             bail!("不是有效的 WAV 檔案（缺少 RIFF header）");
         }
@@ -101,45 +113,125 @@ impl AudioSource {
             bail!("不是 WAVE 格式");
         }
 
-        // 解析 fmt chunk
-        let audio_format = u16::from_le_bytes([data[20], data[21]]);
-        let channels     = u16::from_le_bytes([data[22], data[23]]);
-        let sample_rate  = u32::from_le_bytes([data[24], data[25], data[26], data[27]]);
-        let bits         = u16::from_le_bytes([data[34], data[35]]);
+        let (audio_format, channels, sample_rate, bits) = Self::parse_fmt_chunk(&data)?;
 
-        // 只接受 PCM16
-        if audio_format != 1 {
-            bail!("只支援 PCM WAV（format=1），收到 format={}", audio_format);
-        }
-        if bits != 16 {
-            bail!("只支援 16-bit WAV，收到 {}-bit", bits);
-        }
-        if channels != 1 && channels != 2 {
-            bail!("只支援 mono/stereo WAV");
-        }
+        tracing::info!(
+            "音檔 {:?} format={} channels={} rate={} bits={}",
+            path.file_name().unwrap_or_default(),
+            audio_format, channels, sample_rate, bits
+        );
 
-        // 找 data chunk
-        let pcm16 = Self::find_wav_data(&data)?;
+        let pcma_bytes: Vec<u8> = match audio_format {
+            // ── PCM16 → G.711A ─────────────────────────────────────
+            1 => {
+                if bits != 16 {
+                    bail!("PCM WAV 只支援 16-bit，收到 {}-bit", bits);
+                }
+                let pcm16 = Self::find_wav_data_i16(&data)?;
+                let mono = if channels == 2 {
+                    Self::stereo_to_mono(&pcm16)
+                } else {
+                    pcm16
+                };
+                let at8k = if sample_rate != 8000 {
+                    Self::resample(&mono, sample_rate, 8000)
+                } else {
+                    mono
+                };
+                // PCM16 → A-law
+                at8k.iter().map(|&s| linear_to_alaw(s)).collect()
+            }
 
-        // 若為 stereo，取左聲道
-        let mono = if channels == 2 {
-            Self::stereo_to_mono(&pcm16)
-        } else {
-            pcm16
+            // ── G.711A WAV → 直接使用（若需重取樣則 decode→resample→encode）
+            6 => {
+                if bits != 8 {
+                    bail!("A-law WAV 期望 8-bit，收到 {}-bit", bits);
+                }
+                let mut raw = Self::find_wav_data_raw(&data)?;
+                if channels == 2 {
+                    raw = raw.into_iter().step_by(2).collect();
+                }
+                if sample_rate != 8000 {
+                    let linear: Vec<i16> = raw.iter().map(|&b| alaw_to_linear(b)).collect();
+                    let at8k = Self::resample(&linear, sample_rate, 8000);
+                    at8k.iter().map(|&s| linear_to_alaw(s)).collect()
+                } else {
+                    raw // 已是 8kHz G.711A，直接使用
+                }
+            }
+
+            // ── G.711μ WAV → 轉 G.711A ────────────────────────────
+            7 => {
+                if bits != 8 {
+                    bail!("μ-law WAV 期望 8-bit，收到 {}-bit", bits);
+                }
+                let mut raw = Self::find_wav_data_raw(&data)?;
+                if channels == 2 {
+                    raw = raw.into_iter().step_by(2).collect();
+                }
+                let linear: Vec<i16> = raw.iter().map(|&b| ulaw_to_linear(b)).collect();
+                let at8k = if sample_rate != 8000 {
+                    Self::resample(&linear, sample_rate, 8000)
+                } else {
+                    linear
+                };
+                // μ-law → linear → A-law
+                at8k.iter().map(|&s| linear_to_alaw(s)).collect()
+            }
+
+            other => bail!(
+                "不支援的 WAV 格式 format={}（支援：1=PCM16 / 6=A-law / 7=μ-law）",
+                other
+            ),
         };
 
-        // 若 sample rate != 8000，做簡單重採樣
-        let resampled = if sample_rate != 8000 {
-            Self::resample(&mono, sample_rate, 8000)
-        } else {
-            mono
-        };
-
-        // PCM16 → G.711 μ-law
-        Ok(resampled.iter().map(|&s| linear_to_ulaw(s)).collect())
+        Ok(pcma_bytes)
     }
 
-    fn find_wav_data(data: &[u8]) -> Result<Vec<i16>> {
+    /// raw μ-law bytes → G.711A（A-law）bytes
+    fn ulaw_bytes_to_alaw(raw: Vec<u8>) -> Vec<u8> {
+        raw.iter()
+            .map(|&b| linear_to_alaw(ulaw_to_linear(b)))
+            .collect()
+    }
+
+    /// 尋找並解析 fmt chunk，回傳 (audio_format, channels, sample_rate, bits_per_sample)
+    fn parse_fmt_chunk(data: &[u8]) -> Result<(u16, u16, u32, u16)> {
+        let mut i = 12usize;
+        while i + 8 <= data.len() {
+            let chunk_id   = &data[i..i+4];
+            let chunk_size = u32::from_le_bytes([data[i+4],data[i+5],data[i+6],data[i+7]]) as usize;
+            if chunk_id == b"fmt " && chunk_size >= 16 {
+                let audio_format = u16::from_le_bytes([data[i+8],  data[i+9]]);
+                let channels     = u16::from_le_bytes([data[i+10], data[i+11]]);
+                let sample_rate  = u32::from_le_bytes([data[i+12], data[i+13], data[i+14], data[i+15]]);
+                let bits         = u16::from_le_bytes([data[i+22], data[i+23]]);
+                return Ok((audio_format, channels, sample_rate, bits));
+            }
+            i += 8 + chunk_size;
+            if chunk_size % 2 != 0 { i += 1; }
+        }
+        // fallback：嘗試固定偏移（舊版簡單 WAV）
+        if data.len() >= 36 {
+            let audio_format = u16::from_le_bytes([data[20], data[21]]);
+            let channels     = u16::from_le_bytes([data[22], data[23]]);
+            let sample_rate  = u32::from_le_bytes([data[24], data[25], data[26], data[27]]);
+            let bits         = u16::from_le_bytes([data[34], data[35]]);
+            return Ok((audio_format, channels, sample_rate, bits));
+        }
+        bail!("找不到有效的 fmt chunk");
+    }
+
+    /// 找 data chunk，回傳 i16 PCM 樣本（用於 PCM WAV）
+    fn find_wav_data_i16(data: &[u8]) -> Result<Vec<i16>> {
+        let raw = Self::find_wav_data_raw(data)?;
+        Ok(raw.chunks_exact(2)
+            .map(|b| i16::from_le_bytes([b[0], b[1]]))
+            .collect())
+    }
+
+    /// 找 data chunk，回傳原始 bytes（用於 A-law / μ-law WAV）
+    fn find_wav_data_raw(data: &[u8]) -> Result<Vec<u8>> {
         let mut i = 12usize;
         while i + 8 <= data.len() {
             let chunk_id   = &data[i..i+4];
@@ -147,12 +239,7 @@ impl AudioSource {
             if chunk_id == b"data" {
                 let start = i + 8;
                 let end   = (start + chunk_size).min(data.len());
-                let raw   = &data[start..end];
-                // bytes → i16 samples
-                let samples = raw.chunks_exact(2)
-                    .map(|b| i16::from_le_bytes([b[0], b[1]]))
-                    .collect();
-                return Ok(samples);
+                return Ok(data[start..end].to_vec());
             }
             i += 8 + chunk_size;
             if chunk_size % 2 != 0 { i += 1; } // padding byte
@@ -189,6 +276,54 @@ impl AudioSource {
             .map(|c| c.to_vec())
             .collect()
     }
+}
+
+// ── G.711 A-law 編解碼（ITU-T G.711）────────────────────────────
+
+/// G.711 A-law → 16-bit linear PCM
+/// 遵循 ITU-T G.711 / sox alaw2linear 實作
+pub fn alaw_to_linear(a: u8) -> i16 {
+    let a = a ^ 0x55;
+    let sign = a & 0x80;
+    let seg  = ((a & 0x70) >> 4) as i32;
+    let mut t = (a & 0x0f) as i32;
+    match seg {
+        0 => { t <<= 1; }
+        1 => { t += 0x10; t <<= 1; }
+        _ => { t += 0x10; t <<= seg; }
+    }
+    if sign != 0 { t as i16 } else { -(t as i16) }
+}
+
+/// 16-bit linear PCM → G.711 A-law
+/// 遵循 ITU-T G.711 / sox linear2alaw 實作
+pub fn linear_to_alaw(sample: i16) -> u8 {
+    // G.711 A-law 段落端點（16-bit 輸入）
+    const SEG_END: [i32; 8] = [0xFF, 0x1FF, 0x3FF, 0x7FF, 0xFFF, 0x1FFF, 0x3FFF, 0x7FFF];
+
+    let (mask, mut s): (u8, i32) = if sample >= 0 {
+        (0xD5, sample as i32)
+    } else {
+        (0x55, -(sample as i32) - 8)
+    };
+
+    if s < 0 { s = 0; }
+
+    // 找段落（exponent）
+    let mut seg = 8usize;
+    for (i, &end) in SEG_END.iter().enumerate() {
+        if s <= end { seg = i; break; }
+    }
+    if seg >= 8 { return 0x7F ^ mask; }
+
+    let mant = if seg < 2 {
+        ((s >> 1) & 0x0f) as u8
+    } else {
+        ((s >> (seg + 1)) & 0x0f) as u8
+    };
+
+    let aval = ((seg as u8) << 4) | mant;
+    aval ^ mask
 }
 
 // ── G.711 μ-law 編碼（ITU-T G.711）──────────────────────────────

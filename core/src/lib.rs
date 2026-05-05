@@ -1,6 +1,8 @@
+pub mod agent_engine;
 pub mod config;
 pub mod engine;
 pub mod html_reporter;
+pub mod registrar;
 pub mod reporter;
 pub mod rtp;
 pub mod sip;

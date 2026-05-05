@@ -53,6 +53,11 @@ const flowSteps = computed(() => [
 
 const rtp = computed(() => store.rtpMetrics)
 
+// RTP 是否「已設定啟用」（不管是否完成，只要 enableAudio=true 且有音檔就顯示啟用中）
+const rtpConfigured = computed(() =>
+  store.config.caller.enableAudio && !!store.config.caller.audioFile
+)
+
 const mosColor = computed(() => {
   const m = rtp.value.mos
   if (m >= 4.0) return 'var(--accent)'
@@ -104,9 +109,12 @@ const jitterColor = computed(() => {
     <div class="rp-section">
       <div class="rp-title">
         RTP 聲音品質
-        <span v-if="!rtp.enabled" class="rtp-off">未啟用</span>
+        <span v-if="rtp.enabled" class="rtp-on">G.711A</span>
+        <span v-else-if="rtpConfigured && store.status === 'running'" class="rtp-active">啟用中</span>
+        <span v-else-if="!rtpConfigured" class="rtp-off">未啟用</span>
       </div>
 
+      <!-- 測試完成後顯示 MOS 等統計 -->
       <template v-if="rtp.enabled">
         <!-- MOS -->
         <div class="rtp-row">
@@ -166,6 +174,12 @@ const jitterColor = computed(() => {
           </div>
         </div>
       </template>
+
+      <!-- 測試執行中：已設定 RTP 但還沒有結果 -->
+      <div v-else-if="rtpConfigured" class="rtp-hint">
+        G.711A (PCMA) ← 傳送中<br>
+        <span style="color:var(--text2);font-size:11px;">結果於測試結束後顯示</span>
+      </div>
 
       <!-- RTP 未啟用提示 -->
       <div v-else class="rtp-hint">
@@ -241,6 +255,22 @@ const jitterColor = computed(() => {
   padding: 1px 5px;
   border-radius: 3px;
   text-transform: lowercase;
+}
+.rtp-active {
+  font-size: 9px;
+  color: var(--warn);
+  background: color-mix(in srgb, var(--warn) 15%, transparent);
+  border: 1px solid var(--warn);
+  padding: 1px 5px;
+  border-radius: 3px;
+}
+.rtp-on {
+  font-size: 9px;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 15%, transparent);
+  border: 1px solid var(--accent);
+  padding: 1px 5px;
+  border-radius: 3px;
 }
 
 /* ── State bars ─────────────────────────── */

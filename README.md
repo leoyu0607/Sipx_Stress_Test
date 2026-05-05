@@ -13,6 +13,7 @@
 - [專案結構](#專案結構)
 - [介面說明](#介面說明)
 - [SIP 通話流程](#sip-通話流程)
+- [座席模式（Agent Mode）](#座席模式agent-mode)
 - [RTP 音訊流程](#rtp-音訊流程)
 - [關鍵指標](#關鍵指標)
 - [CLI 快速開始](#cli-快速開始)
@@ -30,8 +31,10 @@
 |------|------|
 | **視窗 GUI** | Tauri 桌面應用，無邊框深色主題，即時圖表與 SIP 日誌顯示 |
 | **終端機 TUI** | ratatui 儀表板，顯示即時 ASR、CPS、並發數（`--tui`） |
-| **SIP 信令** | 完整 INVITE / 100 / 180 / 200 / ACK / BYE / CANCEL 流程（RFC 3261） |
-| **真實 RTP** | 每 20ms 傳送 G.711 PCMU 封包，支援 WAV 音檔循環播放 |
+| **雙模式壓測** | **民眾端**（主動撥出）/ **座席端**（REGISTER 後等待來電並自動接聽） |
+| **SIP 信令** | INVITE / 100 / 180 / 200 / ACK / BYE / CANCEL（RFC 3261）；可處理伺服器主動 RE-INVITE（Session-Expires）與 BYE |
+| **REGISTER + Digest 認證** | 完整 RFC 2617 Digest 流程（401/407 challenge → MD5 response → re-REGISTER 自動刷新）|
+| **真實 RTP** | 每 20ms 傳送 G.711 **PCMA**（A-law）封包，支援 WAV 音檔自動轉檔（PCM16/A-law/μ-law → PCMA）|
 | **聲音品質分析** | MOS 估算（ITU-T E-Model G.107）、掉包率、Jitter（RFC 3550） |
 | **總通數上限** | 民眾模式可設定 `--max-calls N`，達上限後自動停止（不依時長） |
 | **即時計數** | 儀表板同步顯示成功通數、失敗通數、佇列通數、Error Rate |
@@ -78,19 +81,22 @@ sipress/
 │
 ├── core/                         ← 核心 library（無 UI，CLI 與 GUI 共用）
 │   └── src/
-│       ├── config.rs             ← 設定結構（Config / Transport）
-│       ├── engine.rs             ← 壓測主引擎（並發通話控制）
+│       ├── config.rs             ← 設定結構（Config / Transport / Mode / AgentAccount）
+│       ├── engine.rs             ← 民眾端壓測主引擎（並發通話控制）
+│       ├── agent_engine.rs       ← 座席端壓測引擎（REGISTER + 等待來電 + 自動接聽）
+│       ├── registrar.rs          ← 一次性 REGISTER 握手（Phase 1：新增帳號立即驗證）
 │       ├── stats.rs              ← 指標收集（ASR/ACD/PDD/延遲/RTP）
 │       ├── reporter.rs           ← 終端機輸出（Table / JSON / CSV）
 │       ├── html_reporter.rs      ← HTML 報告產生器
 │       ├── sip_logger.rs         ← SIP 完整訊息 log 記錄器
 │       ├── sip/
-│       │   ├── message.rs        ← SIP 訊息建構（INVITE/ACK/BYE/CANCEL）
+│       │   ├── message.rs        ← SIP 訊息建構（INVITE/ACK/BYE/CANCEL/200 OK 鏡射回應）
+│       │   ├── register.rs       ← REGISTER 訊息 + Digest auth (RFC 2617) 解析與計算
 │       │   ├── dialog.rs         ← SIP 對話狀態機
 │       │   ├── parser.rs         ← SIP 回應解析
 │       │   └── transport.rs      ← UDP / TCP 傳輸層
 │       └── rtp/
-│           ├── audio.rs          ← WAV 讀取 + G.711 μ-law 編碼
+│           ├── audio.rs          ← WAV → PCMA（G.711 A-law）自動轉檔；支援 PCM16 / A-law / μ-law
 │           ├── packet.rs         ← RTP 封包建構與解析（RFC 3550）
 │           ├── session.rs        ← Per-call RTP session（port 分配、收發）
 │           └── stats.rs          ← Jitter / 掉包率 / MOS 計算
@@ -148,20 +154,29 @@ sipress/
 
 ## SIP 通話流程
 
+### 民眾端（Caller mode，主動撥出）
+
 ```
 UAC (sipress)              UAS (軟交換機)
      │                          │
      │──── INVITE ─────────────▶│  本機 RTP port 寫入 SDP m= 行
      │◀─── 100 Trying ──────────│
      │◀─── 180 Ringing ─────────│  PDD 計時結束
-     │◀─── 200 OK ──────────────│  通話建立，解析對端 RTP port
+     │◀─── 200 OK ──────────────│  通話建立，解析 SDP c= IP + m= port 找對端 RTP
      │──── ACK ────────────────▶│
      │                          │
-     │═══ RTP G.711 音訊流 ════▶│  每 20ms 一個 160-byte PCMU frame
-     │◀══ RTP G.711 音訊流 ═════│  計算 Jitter / 掉包 / MOS
+     │═══ RTP G.711A 音訊流 ═══▶│  每 20ms 一個 160-byte PCMA frame
+     │◀══ RTP G.711A 音訊流 ════│  計算 Jitter / 掉包 / MOS
+     │                          │
+     │◀─── RE-INVITE ───────────│  Session-Expires 會話刷新
+     │──── 200 OK + SDP ───────▶│  自動回應保活（避免被掛斷）
      │                          │
      │──── BYE ────────────────▶│  通話持續時間計時結束，停止 RTP
      │◀─── 200 OK ──────────────│
+     │
+     │  （或：伺服器主動掛斷時）
+     │◀─── BYE ─────────────────│
+     │──── 200 OK ─────────────▶│  自動回應，記錄通話結束
      │
      │  （INVITE 逾時未收到回應時）
      │──── CANCEL ─────────────▶│  RFC 3261 §9
@@ -169,23 +184,134 @@ UAC (sipress)              UAS (軟交換機)
 
 ---
 
+## 座席模式（Agent Mode）
+
+座席模式模擬一群 SIP 話機（座席分機）：對交換機 REGISTER 後等待來電，收到 INVITE 自動接聽，是壓測「座席端負載」的工具。
+
+### 流程概觀
+
+```
+[GUI 切到「座席端」]
+       │
+       ├── 在 Sidebar 「快速生成帳號」或拖曳 CSV 匯入
+       │       │
+       │       ▼
+       │   每個帳號獨立呼叫 register_account（一次性驗證）
+       │   ─→ status 變成 'registered' / 'failed'
+       │
+[按「開始測試」]
+       │
+       ▼
+   AgentEngine::run()
+       │
+       ├── 為每個 AgentAccount spawn 一個 task：
+       │       1. REGISTER（含 Digest 重送）
+       │       2. 等待 INVITE → 自動 100 Trying → 200 OK + SDP（PCMA）
+       │       3. 處理 ACK / RE-INVITE / BYE / CANCEL / OPTIONS
+       │       4. 在 Expires/2 計時器到期時 re-REGISTER
+       │
+       └── 測試時間到 → 通知所有 task 發 REGISTER Expires=0 → 結束
+```
+
+### 帳號清單格式
+
+GUI 可拖曳 CSV / TXT 檔，支援以下三種格式（首行若是標頭會自動跳過）：
+
+```csv
+extension,username,password,domain
+1001,user1001,pass1001,sip.example.com
+1002,user1002,pass1002,sip.example.com
+```
+
+```
+1001:pass1001:sip.example.com
+1002:pass1002:sip.example.com
+```
+
+```
+1001 user1001 pass1001 sip.example.com
+1002 user1002 pass1002 sip.example.com
+```
+
+### 帳號狀態
+
+| 狀態（badge）| 含義 |
+|---|---|
+| `—` | idle，剛建立尚未註冊 |
+| `…` | registering，REGISTER 進行中 |
+| `REG`（綠）| 已註冊成功 |
+| `ERR`（紅）| 認證失敗 / 拒絕 / 逾時，Event Log 會顯示具體 SIP 狀態碼 |
+
+按 Sidebar 的「重新註冊」可對所有非 registered 帳號再試一次。
+
+### 自動處理的 SIP 訊息
+
+座席模式下，sipress 會處理以下伺服器主動發來的訊息：
+
+| 收到的請求 | 自動回應 |
+|---|---|
+| `INVITE` 新通話 | `100 Trying` → `200 OK` + SDP（PCMA） |
+| `INVITE` （已建立 dialog） | RE-INVITE 視為保活，回 `200 OK` + SDP |
+| `ACK` | 不需回應 |
+| `BYE` | `200 OK`，計入 calls_completed |
+| `CANCEL` | `200 OK`（CANCEL）+ `487 Request Terminated`（INVITE） |
+| `OPTIONS` | `200 OK`（健康檢查） |
+
+### 限制
+
+- 目前 SDP 中宣告的 RTP port 是隨機數字，**未真實綁定**也未收/送 RTP；對方送來的音訊會被丟棄。若交換機要求媒體必須暢通才認為通話健康，可能會 BYE 通話。Phase 3 會補上真實 RTP。
+- 測試前用 GUI 「快速生成帳號」做的 `register_account` 是短期 socket，與壓測時 `AgentEngine` 持有的 socket 是兩條線；同帳號雙路 Contact 在嚴格的交換機上可能會被拒。建議：壓測前先確認帳號可註冊（看 badge 變綠），開始測試後不要再按「重新註冊」。
+
+
+
+```
+sipress (UAC for REGISTER, UAS for INVITE)        軟交換機
+     │                                                  │
+     │──── REGISTER ───────────────────────────────────▶│
+     │◀─── 401 Unauthorized + WWW-Authenticate ─────────│  Digest challenge
+     │──── REGISTER + Authorization (Digest MD5) ──────▶│
+     │◀─── 200 OK (Expires=N) ──────────────────────────│  註冊成功，Expires/2 後 re-REGISTER
+     │                                                  │
+     │           （等待外部撥入）                       │
+     │                                                  │
+     │◀─── INVITE (sip:agent@host) ─────────────────────│  外部使用者來電
+     │──── 100 Trying ─────────────────────────────────▶│
+     │──── 200 OK + SDP (PCMA) ────────────────────────▶│  自動接聽
+     │◀─── ACK ─────────────────────────────────────────│
+     │                                                  │
+     │                                                  │
+     │◀─── BYE ─────────────────────────────────────────│  對方掛斷
+     │──── 200 OK ─────────────────────────────────────▶│
+     │                                                  │
+     │           （測試結束）                           │
+     │──── REGISTER (Expires=0) ───────────────────────▶│  解除註冊
+     │◀─── 200 OK ──────────────────────────────────────│
+```
+
+---
+
 ## RTP 音訊流程
 
 ```
-音檔（.wav / .raw）
+音檔（.wav / .al / .ul / .raw）
        │
        ▼
-   AudioSource          每 20ms 輸出一個 frame（160 bytes）
-   ┌─────────────────────────────────────┐
-   │  WAV PCM16 → 重採樣至 8kHz → μ-law │
-   │  循環播放，通話結束自動停止          │
-   └─────────────────────────────────────┘
+   AudioSource::from_file()    自動偵測格式並轉換為 G.711A (PCMA)
+   ┌────────────────────────────────────────────────────┐
+   │  WAV format=1 (PCM16)  → linear_to_alaw()          │
+   │  WAV format=6 (A-law)  → 直接讀取                  │
+   │  WAV format=7 (μ-law)  → ulaw_to_linear → A-law    │
+   │  raw .al / .alaw       → 直接讀取                  │
+   │  raw .ul / .ulaw       → μ-law → A-law             │
+   │  → 切成 160-byte frames（20ms @ 8kHz）             │
+   │  → 循環播放                                         │
+   └────────────────────────────────────────────────────┘
        │
        ▼
-   RtpPacket::encode()  PT=0(PCMU)  seq++  ts+=160  SSRC=random
+   RtpPacket::encode()  PT=8 (PCMA)  seq++  ts+=160  SSRC=random
        │
        ▼
-   UdpSocket::send()    傳送至對端 RTP port（從 200 OK SDP 解析）
+   UdpSocket::send()    傳送至 SDP c= IP + m= port
 
 接收端（同時執行）：
    UdpSocket::recv() → RtpPacket::decode()
@@ -199,8 +325,13 @@ UAC (sipress)              UAS (軟交換機)
 
 | 格式 | 說明 |
 |------|------|
-| `.wav` | PCM 16-bit mono 或 stereo，8kHz / 16kHz（自動重採樣） |
-| `.raw` / `.ul` / `.pcmu` | 原始 G.711 μ-law，8kHz mono |
+| `.wav` (PCM16) | 16-bit mono / stereo，自動轉成 G.711A |
+| `.wav` (A-law)  | format=6（PCMA），直接使用 |
+| `.wav` (μ-law)  | format=7（PCMU），自動轉成 PCMA |
+| `.al` / `.alaw` / `.pcma` | 原始 G.711 A-law，8kHz mono |
+| `.ul` / `.ulaw` / `.pcmu` / `.raw` | 原始 G.711 μ-law，自動轉成 A-law |
+
+> **所有音檔最終都會轉換為 G.711A（PCMA, PT=8）傳送**。SDP offer 只宣告 `m=audio PORT RTP/AVP 8 / a=rtpmap:8 PCMA/8000`，避免伺服器選到 PCMU 而導致音訊不正確。
 
 ---
 
@@ -432,18 +563,23 @@ npm run tauri dev   # 開啟視窗，hot-reload 前端
 
 ### `core/src/engine.rs`
 
-壓測主引擎（Tokio 非同步）：
-- **接收 task**：單一 UDP recv 迴圈，解析回應發至 channel
+民眾端壓測主引擎（Tokio 非同步）：
+- **接收 task**：單一 UDP recv 迴圈，**區分 SIP 回應與請求**；回應發至 channel；伺服器主動的 INVITE / BYE 也送進 channel 由主控迴圈處理
 - **進度 task**：每秒觸發 `on_progress` callback（TUI / GUI 更新）
 - **主控迴圈**：處理 SIP 事件 → 掃描逾時 → 依 CPS 發起新通話 → 判斷結束
+- 收到伺服器 RE-INVITE（Session-Expires）→ 自動 200 OK 保活
+- 收到伺服器 BYE → 自動 200 OK，記錄通話結束
 - RTP session 在收到 200 OK 後啟動，BYE 後停止並收集統計
 
 ### `core/src/sip/message.rs`
 
 手刻 SIP 訊息格式（不依賴外部 crate）：
-- `SipMessage::invite()` — 含 SDP，`m=audio PORT RTP/AVP 0` 使用預分配的本機 port
+- `SipMessage::invite()` — 含 SDP，`m=audio PORT RTP/AVP 8 / a=rtpmap:8 PCMA/8000`，使用預分配的本機 port
 - `SipMessage::cancel()` — RFC 3261 §9 CANCEL
-- `SipResponse::sdp_rtp_port()` — 從 200 OK body 解析對端 RTP port
+- `SipMessage::ok_for_server_bye(raw_request)` — 對伺服器 BYE 鏡射標頭回 200 OK
+- `SipMessage::ok_for_server_reinvite(raw_request, local_addr, rtp_port)` — 對 RE-INVITE 回 200 OK + SDP
+- `SipResponse::sdp_rtp_addr()` — 從 200 OK 解析 SDP 的 `c=` connection IP **與** `m=` port，回傳 `"ip:port"`（修正過去只取 port 而誤用 SIP server IP 的 bug）
+- `SipResponse::sdp_rtp_port()` — 向下相容用，只取 port
 
 ### `core/src/rtp/session.rs`
 
@@ -451,12 +587,41 @@ npm run tauri dev   # 開啟視窗，hot-reload 前端
 
 ### `gui/src-tauri/src/commands.rs`
 
-五個 Tauri command，前端透過 `invoke()` 呼叫：
+六個 Tauri command，前端透過 `invoke()` 呼叫：
 
 | Command | 說明 |
 |---------|------|
-| `start_test(config)` | 啟動壓測（背景非同步，立即回傳） |
-| `stop_test()` | 手動停止 |
+| `start_test(config)` | 啟動壓測（背景非同步，立即回傳）。依 `config.mode` 自動分派到 `Engine`（Caller）或 `AgentEngine`（Agent） |
+| `stop_test()` | 手動停止；座席模式停止時會自動發 `REGISTER Expires=0` 解除註冊 |
 | `get_snapshot()` | 取得即時 `StatsSnapshot`（前端每秒輪詢） |
 | `get_report()` | 取得最終 `FinalReport`（壓測完成後） |
 | `get_html_report(server_addr, timestamp)` | 產生 HTML 報告字串（前端下載為 `.html` 檔）；`server_addr` 會顯示在報告標頭 |
+| `register_account(server, domain, username, password, expires, transport)` | 對單一帳號發起一次性 REGISTER（含 401 Digest 重送），用於座席模式新增帳號時的即時驗證 |
+
+### `core/src/agent_engine.rs`
+
+座席端壓測引擎，每個 `AgentAccount` 一個獨立 tokio task + 自帶 UDP socket：
+
+1. **REGISTER**：初次無認證 → 收 401 解析 `WWW-Authenticate: Digest` → 用 MD5 計算 response → 重送
+2. **保持註冊**：在 `Expires/2` 計時器到期時 re-REGISTER（沿用快取的 challenge）
+3. **接受來電**：收到 INVITE → 100 Trying → 200 OK + SDP（PCMA）→ 等 ACK
+4. **保活**：收到 RE-INVITE（Session-Expires）→ 200 OK + SDP
+5. **掛斷**：收到 BYE → 200 OK
+6. **CANCEL / OPTIONS**：自動處理（487 / 200 OK）
+7. **結束**：收到外部停止訊號 → REGISTER Expires=0 → exit
+
+### `core/src/sip/register.rs`
+
+REGISTER 訊息建構 + RFC 2617 Digest auth：
+- `RegisterMessage::build()` — REGISTER 訊息，可選夾帶 `Authorization`
+- `DigestChallenge::parse()` — 從 401/407 回應解析 `realm/nonce/algorithm/qop/opaque`
+- `DigestChallenge::build_authorization()` — 計算 MD5 response 並產生 `Authorization` header
+
+支援 `qop=auth`（含 `nc` / `cnonce`）與 RFC 2069 fallback（無 qop）。
+
+### `core/src/registrar.rs`
+
+`register_once()`：對單一帳號發起完整一次 REGISTER 握手（用於 GUI 新增帳號時的即時驗證）：
+- 短期 UDP socket，握手結束即關閉
+- 自動處理 401 → Digest 重送
+- 回傳 `RegisterResult { status, message, expires_secs, sip_code }`

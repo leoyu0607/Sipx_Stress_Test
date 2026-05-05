@@ -1,6 +1,7 @@
 pub mod dialog;
 pub mod message;
 pub mod parser;
+pub mod register;
 pub mod transport;
 
 pub use dialog::{Dialog, DialogState};

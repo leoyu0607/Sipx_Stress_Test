@@ -7,7 +7,7 @@
 
 use crate::rtp::{
     audio::AudioSource,
-    packet::{RtpPacket, PT_PCMU},
+    packet::RtpPacket,
     stats::{RtpStats, RtpStatsSnapshot},
 };
 use anyhow::{Context, Result};
@@ -81,13 +81,36 @@ impl RtpSession {
 
             tokio::spawn(async move {
                 let mut source = match &audio_path {
-                    Some(p) => AudioSource::from_file(p)
-                        .unwrap_or_else(|e| {
-                            tracing::warn!("音檔載入失敗（{:?}），改用靜音: {}", p, e);
-                            AudioSource::silence()
-                        }),
-                    None => AudioSource::silence(),
+                    Some(p) => {
+                        match AudioSource::from_file(p) {
+                            Ok(src) => {
+                                eprintln!(
+                                    "[sipress] 音檔載入成功: {:?}  frames={} duration={:.1}s PT={}",
+                                    p.file_name().unwrap_or_default(),
+                                    src.frame_count(),
+                                    src.duration_secs(),
+                                    src.payload_type,
+                                );
+                                src
+                            }
+                            Err(e) => {
+                                eprintln!("[sipress] 音檔載入失敗: {:?} → {}", p, e);
+                                tracing::warn!("音檔載入失敗（{:?}），改用靜音: {}", p, e);
+                                AudioSource::silence()
+                            }
+                        }
+                    }
+                    None => {
+                        eprintln!("[sipress] 未指定音檔，送靜音 (PCMA 0xD5)");
+                        AudioSource::silence()
+                    }
                 };
+
+                // 使用音檔偵測到的 payload type（0=PCMU / 8=PCMA）
+                let payload_type = source.payload_type;
+                tracing::debug!("RTP 傳送 payload_type={} ({})",
+                    payload_type,
+                    if payload_type == 8 { "PCMA/A-law" } else { "PCMU/μ-law" });
 
                 let mut seq: u16 = rand::thread_rng().gen();
                 let mut ts:  u32 = rand::thread_rng().gen();
@@ -103,7 +126,7 @@ impl RtpSession {
                         None    => break,  // 非循環模式播完
                     };
 
-                    let pkt   = RtpPacket::new(PT_PCMU, seq, ts, ssrc, frame.clone());
+                    let pkt   = RtpPacket::new(payload_type, seq, ts, ssrc, frame.clone());
                     let bytes = pkt.encode();
 
                     stats.on_send(frame.len());

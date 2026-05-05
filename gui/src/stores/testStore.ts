@@ -94,6 +94,7 @@ interface RustSnapshot {
   calls_failed:     number
   calls_timeout:    number
   calls_concurrent: number
+  rtp_sessions:     number   // 目前活躍 RTP session 數（> 0 = 音訊傳送中）
   asr:              number
   error_rate:       number
 }
@@ -187,6 +188,7 @@ export const useTestStore = defineStore('test', () => {
   let pollTimer:  ReturnType<typeof setInterval> | null = null
   let clockTimer: ReturnType<typeof setInterval> | null = null
   let prevInitiated = 0
+  let rtpLoggedOnce = false   // 防止重複寫 RTP session 啟動 log
 
   // ── Computed ──────────────────────────────────────────────────────────────────
   const mosRating = computed(() => {
@@ -222,7 +224,8 @@ export const useTestStore = defineStore('test', () => {
         : ` --to-prefix ${c.caller.calleePrefix} --to-range ${c.caller.calleeRange}`
       return `./sipress -s ${c.server} --mode caller --number ${c.caller.accessNumber}${callee} -c ${c.caller.concurrency} --cps ${c.caller.cps} --duration ${c.duration} --transport ${tr}${total}${audio}`
     } else {
-      return `./sipress -s ${c.server} --mode agent --accounts accounts.csv --duration ${c.duration} --transport ${tr}`
+      const n = c.agent.accounts.length
+      return `./sipress -s ${c.server} --mode agent --accounts accounts.csv (${n} 個帳號) --duration ${c.duration} --transport ${tr}`
     }
   })
 
@@ -268,6 +271,15 @@ export const useTestStore = defineStore('test', () => {
       rtp_base_port:        16000,
       audio_file:           c.caller.enableAudio && c.caller.audioFile ? c.caller.audioFile : null,
       enable_rtp:           c.caller.enableAudio && !!c.caller.audioFile,
+      mode:                 c.mode,                                          // 'caller' | 'agent'
+      agent_accounts:       c.mode === 'agent'
+        ? c.agent.accounts.map(a => ({
+            extension: a.extension,
+            username:  a.username,
+            password:  a.password,
+            domain:    a.domain || c.agent.defaultDomain,
+          }))
+        : [],
     }
   }
 
@@ -299,6 +311,12 @@ export const useTestStore = defineStore('test', () => {
 
     if (snap.calls_failed + snap.calls_timeout > 0)
       addLog('warn', `失敗 ${snap.calls_failed} 逾時 ${snap.calls_timeout}  發起 ${snap.calls_initiated}  ASR ${snap.asr.toFixed(1)}%`)
+
+    // RTP session 啟動後只寫一次 log
+    if ((snap.rtp_sessions ?? 0) > 0 && !rtpLoggedOnce) {
+      rtpLoggedOnce = true
+      addLog('ok', `RTP G.711A 音訊傳送中（${snap.rtp_sessions} session${snap.rtp_sessions > 1 ? 's' : ''} active）`)
+    }
   }
 
   async function _tryFetchReport() {
@@ -348,6 +366,7 @@ export const useTestStore = defineStore('test', () => {
     status.value = 'running'
     elapsedSec.value = 0
     prevInitiated = 0
+    rtpLoggedOnce = false
     metrics.value  = { cps:0, concurrency:0, succeeded:0, failed:0, queued:0, asr:0, ccr:0, errorRate:0, pdd:0, acd:0 }
     series.value   = { cps:[], conc:[], asr:[], ccr:[], pdd:[], fail:[], mos:[] }
     respCodes.value = { '100':0,'180':0,'200':0,'486':0,'404':0,'503':0,'408':0 }
@@ -355,9 +374,32 @@ export const useTestStore = defineStore('test', () => {
     rtpMetrics.value = { enabled:false, mos:0, packetLoss:0, jitter:0, packetsSent:0, packetsRecv:0, outOfOrder:0 }
 
     try {
+      // 座席模式檢查：必須有帳號
+      if (config.value.mode === 'agent' && config.value.agent.accounts.length === 0) {
+        addLog('err', '座席模式需要至少一個帳號，請先新增')
+        status.value = 'error'
+        return
+      }
+
       await invoke('start_test', { config: buildRustConfig() })
       addLog('ok',   `test started → ${config.value.server}  [${config.value.mode} mode]`)
-      addLog('info', `duration: ${config.value.duration > 0 ? config.value.duration + 's' : '不限'}  cps: ${config.value.caller.cps}  concur: ${config.value.caller.concurrency}${config.value.caller.totalCalls > 0 ? `  max-calls: ${config.value.caller.totalCalls}` : ''}`)
+      if (config.value.mode === 'caller') {
+        addLog('info', `duration: ${config.value.duration > 0 ? config.value.duration + 's' : '不限'}  cps: ${config.value.caller.cps}  concur: ${config.value.caller.concurrency}${config.value.caller.totalCalls > 0 ? `  max-calls: ${config.value.caller.totalCalls}` : ''}`)
+        // RTP 設定狀態
+        if (config.value.caller.enableAudio && config.value.caller.audioFile) {
+          const fname = config.value.caller.audioFile.replace(/\\/g, '/').split('/').pop() ?? config.value.caller.audioFile
+          addLog('info', `RTP codec=G.711A(PCMA)  audio="${fname}"  port=${buildRustConfig().rtp_base_port}`)
+        } else if (config.value.caller.enableAudio) {
+          addLog('warn', `RTP 已啟用但未選音檔，將送靜音 (0xD5)`)
+        } else {
+          addLog('info', `RTP 未啟用（僅 SIP signaling）`)
+        }
+      } else {
+        // agent mode
+        const total = config.value.agent.accounts.length
+        addLog('info', `座席端：${total} 個帳號待註冊；duration: ${config.value.duration > 0 ? config.value.duration + 's' : '不限'}`)
+        addLog('info', `行為：每個帳號 REGISTER → 等待 INVITE → 自動 200 OK → 等 BYE → 結束 deregister`)
+      }
     } catch (e) {
       addLog('err', `啟動失敗: ${e}`)
       status.value = 'error'
@@ -403,19 +445,77 @@ export const useTestStore = defineStore('test', () => {
   }
 
   function generateAccounts(opts: GenerateOptions) {
+    const created: SipAccount[] = []
     for (let i = 0; i < opts.count; i++) {
       const ext  = String(opts.startExt + i)
       const user = opts.usernamePrefix ? `${opts.usernamePrefix}${ext}` : ext
       const pass = opts.passwordMode === 'ext'    ? ext
                  : opts.passwordMode === 'custom' ? opts.customPassword.replace('{ext}', ext)
                  : opts.samePassword
-      config.value.agent.accounts.push({
+      const acc: SipAccount = {
         id: uid(), extension: ext, username: user,
         password: pass, domain: opts.domain, status: 'idle',
-      })
+      }
+      config.value.agent.accounts.push(acc)
+      created.push(acc)
     }
     config.value.agent.count = config.value.agent.accounts.length
     addLog('ok', `生成 ${opts.count} 個座席帳號（分機 ${opts.startExt}–${opts.startExt + opts.count - 1}）`)
+    // 立即註冊每個新建帳號
+    for (const a of created) registerAccount(a.id)
+  }
+
+  // ── REGISTER：對單一帳號發 SIP REGISTER ────────────────────────────────
+  interface RustRegisterResult {
+    status: 'registered' | 'auth_failed' | 'rejected' | 'timeout' | 'network_error'
+    message: string
+    expires_secs: number | null
+    sip_code: number | null
+  }
+
+  async function registerAccount(id: string) {
+    const acc = config.value.agent.accounts.find(a => a.id === id)
+    if (!acc) return
+    if (!acc.username || !acc.password) {
+      acc.status = 'failed'
+      addLog('warn', `帳號 ${acc.extension}：缺少帳號或密碼，跳過註冊`)
+      return
+    }
+    acc.status = 'registering'
+    try {
+      const result = await invoke<RustRegisterResult>('register_account', {
+        server:    config.value.server,
+        domain:    acc.domain || config.value.agent.defaultDomain || null,
+        username:  acc.username,
+        password:  acc.password,
+        expires:   3600,
+        transport: config.value.transport,
+      })
+      // result.status 來自 Rust（snake_case）
+      if (result.status === 'registered') {
+        acc.status = 'registered'
+        addLog('ok', `[${acc.extension}] 註冊成功（expires=${result.expires_secs ?? 3600}s）`)
+      } else if (result.status === 'auth_failed') {
+        acc.status = 'failed'
+        addLog('err', `[${acc.extension}] 認證失敗 — ${result.message}`)
+      } else {
+        acc.status = 'failed'
+        addLog('err', `[${acc.extension}] 註冊失敗 — ${result.message}`)
+      }
+    } catch (e) {
+      acc.status = 'failed'
+      addLog('err', `[${acc.extension}] 註冊呼叫錯誤 — ${e}`)
+    }
+  }
+
+  /// 重新註冊所有 idle/failed 帳號（手動觸發用）
+  async function registerAll() {
+    for (const a of config.value.agent.accounts) {
+      if (a.status !== 'registered') {
+        // 並行：每個帳號獨立 socket，互不干擾
+        registerAccount(a.id)
+      }
+    }
   }
 
   function removeAccount(id: string) {
@@ -465,6 +565,8 @@ export const useTestStore = defineStore('test', () => {
       config.value.agent.accounts.push(...parsed)
       config.value.agent.count = config.value.agent.accounts.length
       addLog('ok', `imported ${parsed.length} SIP accounts`)
+      // 匯入後立即註冊
+      for (const a of parsed) registerAccount(a.id)
     }
   }
 
@@ -519,6 +621,7 @@ export const useTestStore = defineStore('test', () => {
     addLog, clearLog,
     generateAccounts, removeAccount, clearAccounts, updateAccount,
     importAccountText, parseAccountText,
+    registerAccount, registerAll,
     startTest, stopTest,
     exportJson, exportCsv, exportHtml, exportAccountsCsv,
   }

@@ -27,12 +27,19 @@ pub struct Engine {
 #[derive(Debug)]
 enum SipEvent {
     Response {
-        call_id:         String,
-        code:            u16,
-        to_tag:          Option<String>,
-        method:          Option<String>,
-        /// 從 200 OK SDP 解析出的對端 RTP port（其餘回應為 None）
-        remote_rtp_port: Option<u16>,
+        call_id:          String,
+        code:             u16,
+        to_tag:           Option<String>,
+        method:           Option<String>,
+        /// 從 200 OK SDP 解析出的對端 RTP 地址（"ip:port"；其餘回應為 None）
+        remote_rtp_addr:  Option<String>,
+    },
+    /// 收到伺服器主動發來的 SIP 請求（RE-INVITE 刷新 session / 伺服器 BYE 掛斷）
+    IncomingRequest {
+        call_id: String,
+        method:  String,
+        /// 原始訊息（用於建構 200 OK 回應，鏡射 Via/From/To/CSeq）
+        raw:     String,
     },
 }
 
@@ -127,29 +134,55 @@ impl Engine {
                 let raw = String::from_utf8_lossy(&buf[..n]).into_owned();
                 debug!("< {}", raw.lines().next().unwrap_or(""));
 
-                // 記錄原始 SIP 回應
+                // 記錄原始 SIP 訊息（請求或回應）
                 log_recv.log_message(Direction::Recv, &raw, &udp_recv.server.to_string());
 
-                let code   = SipResponse::status_code(&raw);
-                let to_tag = SipResponse::to_tag(&raw);
-                let method = SipResponse::cseq_method(&raw);
+                if raw.starts_with("SIP/2.0") {
+                    // ── SIP 回應 ──────────────────────────────────────────
+                    let code   = SipResponse::status_code(&raw);
+                    let to_tag = SipResponse::to_tag(&raw);
+                    let method = SipResponse::cseq_method(&raw);
 
-                // 只有 200 OK for INVITE 才需解析 SDP
-                let remote_rtp_port = if code == Some(200) {
-                    SipResponse::sdp_rtp_port(&raw)
+                    // 只有 200 OK for INVITE 才需解析 SDP（同時取 c= IP 和 m= port）
+                    let remote_rtp_addr = if code == Some(200) && method.as_deref() == Some("INVITE") {
+                        let sip_ip = udp_recv.server.ip().to_string();
+                        SipResponse::sdp_rtp_addr(&raw, &sip_ip)
+                    } else {
+                        None
+                    };
+
+                    let call_id = raw.lines()
+                        .find(|l| l.to_lowercase().starts_with("call-id:"))
+                        .and_then(|l| l.splitn(2, ':').nth(1))
+                        .map(|s| s.trim().to_string());
+
+                    if let (Some(call_id), Some(code)) = (call_id, code) {
+                        let _ = ev_tx2.send(SipEvent::Response {
+                            call_id, code, to_tag, method, remote_rtp_addr,
+                        });
+                    }
                 } else {
-                    None
-                };
+                    // ── SIP 請求（伺服器主動送來：RE-INVITE / BYE 等）──────
+                    let method_str = raw.lines().next()
+                        .and_then(|l| l.split_whitespace().next())
+                        .map(|s| s.to_uppercase())
+                        .unwrap_or_default();
 
-                let call_id = raw.lines()
-                    .find(|l| l.to_lowercase().starts_with("call-id:"))
-                    .and_then(|l| l.splitn(2, ':').nth(1))
-                    .map(|s| s.trim().to_string());
+                    // 只處理需要回應的方法（ACK 不需回應，OPTIONS 暫不處理）
+                    if method_str == "INVITE" || method_str == "BYE" {
+                        let call_id = raw.lines()
+                            .find(|l| l.to_lowercase().starts_with("call-id:"))
+                            .and_then(|l| l.splitn(2, ':').nth(1))
+                            .map(|s| s.trim().to_string());
 
-                if let (Some(call_id), Some(code)) = (call_id, code) {
-                    let _ = ev_tx2.send(SipEvent::Response {
-                        call_id, code, to_tag, method, remote_rtp_port,
-                    });
+                        if let Some(call_id) = call_id {
+                            let _ = ev_tx2.send(SipEvent::IncomingRequest {
+                                call_id,
+                                method: method_str,
+                                raw,
+                            });
+                        }
+                    }
                 }
             }
         });
@@ -189,9 +222,10 @@ impl Engine {
         loop {
             let now = Instant::now();
 
-            // ① 處理所有收到的 SIP 回應
+            // ① 處理所有收到的 SIP 事件（回應 / 伺服器請求）
             while let Ok(ev) = ev_rx.try_recv() {
-                let SipEvent::Response { call_id, code, to_tag, method, remote_rtp_port } = ev;
+                match ev {
+                SipEvent::Response { call_id, code, to_tag, method, remote_rtp_addr } => {
                 let mut dialogs = dialogs.lock().await;
 
                 if let Some(dialog) = dialogs.get_mut(&call_id) {
@@ -216,27 +250,50 @@ impl Engine {
                             if cfg.enable_rtp {
                                 let pure_ip = local_ip.split(':').next().unwrap_or(local_ip).to_string();
                                 let server_ip = cfg.server_addr.split(':').next().unwrap_or("127.0.0.1");
-                                // 優先使用 SDP 解析的對端 port，fallback 為 16384
-                                let remote_port = remote_rtp_port.unwrap_or(16384);
+
+                                // 使用 SDP 解析的 c= IP + m= port；fallback 為 SIP server IP:16384
+                                let remote_addr = remote_rtp_addr
+                                    .clone()
+                                    .unwrap_or_else(|| format!("{}:16384", server_ip));
+
                                 let local_pre = dialog.local_rtp_port;
+                                let audio_path = cfg.audio_file.clone();
+
+                                // 寫診斷資訊到 SIP log
+                                let rtp_info = format!(
+                                    "RTP START local={}:{} remote={} audio={:?} sdp_parsed={}",
+                                    pure_ip,
+                                    if local_pre > 0 { local_pre } else { cfg.rtp_base_port },
+                                    remote_addr,
+                                    audio_path.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "silence".into()),
+                                    remote_rtp_addr.is_some(),
+                                );
+                                sip_log.log_event(&call_id, &rtp_info);
+                                eprintln!("[sipress] {}", rtp_info);
+
                                 let rtp_cfg = RtpSessionConfig {
                                     base_port:   cfg.rtp_base_port,
                                     local_ip:    pure_ip,
-                                    remote_addr: format!("{}:{}", server_ip, remote_port),
-                                    audio_file:  cfg.audio_file.clone(),
+                                    remote_addr,
+                                    audio_file:  audio_path,
                                     ssrc:        None,
                                     local_port:  if local_pre > 0 { Some(local_pre) } else { None },
                                 };
                                 let pc = Arc::clone(&rtp_port_counter);
                                 let rtp_sessions_clone = Arc::clone(&rtp_sessions);
+                                let log_rtp = Arc::clone(&sip_log);
+                                let live_rtp = Arc::clone(&live);
                                 let cid = call_id.clone();
                                 tokio::spawn(async move {
                                     match RtpSession::start(rtp_cfg, pc).await {
                                         Ok(session) => {
+                                            live_rtp.on_rtp_start();
                                             rtp_sessions_clone.lock().await.insert(cid, session);
                                         }
                                         Err(e) => {
-                                            tracing::warn!("RTP session 啟動失敗: {}", e);
+                                            let msg = format!("RTP session 啟動失敗: {}", e);
+                                            eprintln!("[sipress] {}", msg);
+                                            log_rtp.log_event(&cid, &msg);
                                         }
                                     }
                                 });
@@ -274,10 +331,12 @@ impl Engine {
                                 let cid = call_id.clone();
                                 let rtp_s = Arc::clone(&rtp_sessions);
                                 let snaps = Arc::clone(&rtp_snapshots);
+                                let live_rtp = Arc::clone(&live);
                                 tokio::spawn(async move {
                                     let mut sessions = rtp_s.lock().await;
                                     if let Some(session) = sessions.remove(&cid) {
                                         let snap = session.stop();
+                                        live_rtp.on_rtp_stop();
                                         snaps.lock().await.push(snap);
                                     }
                                 });
@@ -318,6 +377,70 @@ impl Engine {
                         _ => {}
                     }
                 }
+                } // SipEvent::Response
+                SipEvent::IncomingRequest { call_id, method, raw: req_raw } => {
+                    let mut dialogs = dialogs.lock().await;
+                    if let Some(dialog) = dialogs.get_mut(&call_id) {
+                        match method.as_str() {
+                            "INVITE" => {
+                                // RE-INVITE（Session-Expires 刷新）→ 200 OK 保持通話
+                                sip_log.log_event(&call_id, "收到 RE-INVITE（Session-Expires），回應 200 OK");
+                                let local_port = if dialog.local_rtp_port > 0 {
+                                    dialog.local_rtp_port
+                                } else {
+                                    cfg.rtp_base_port
+                                };
+                                let ok      = SipMessage::ok_for_server_reinvite(&req_raw, &local_addr, local_port);
+                                let udp_ok  = Arc::clone(&udp);
+                                let log_ok  = Arc::clone(&sip_log);
+                                let server  = cfg.server_addr.clone();
+                                let ok_copy = ok.clone();
+                                tokio::spawn(async move {
+                                    log_ok.log_message(Direction::Send, &ok_copy, &server);
+                                    let _ = udp_ok.send(&ok_copy).await;
+                                });
+                            }
+                            "BYE" => {
+                                // 伺服器主動掛斷 → 200 OK 並結束本通話
+                                sip_log.log_event(&call_id, "收到伺服器 BYE，回應 200 OK");
+                                let ok      = SipMessage::ok_for_server_bye(&req_raw);
+                                let udp_ok  = Arc::clone(&udp);
+                                let log_ok  = Arc::clone(&sip_log);
+                                let server  = cfg.server_addr.clone();
+                                let ok_copy = ok.clone();
+                                tokio::spawn(async move {
+                                    log_ok.log_message(Direction::Send, &ok_copy, &server);
+                                    let _ = udp_ok.send(&ok_copy).await;
+                                });
+
+                                if cfg.enable_rtp && matches!(dialog.state, DialogState::Connected) {
+                                    if let Some(a) = dialog.answered_at {
+                                        detail.record_duration(a.elapsed().as_secs_f64());
+                                    }
+                                    let cid      = call_id.clone();
+                                    let rtp_s    = Arc::clone(&rtp_sessions);
+                                    let snaps    = Arc::clone(&rtp_snapshots);
+                                    let live_rtp = Arc::clone(&live);
+                                    tokio::spawn(async move {
+                                        let mut sessions = rtp_s.lock().await;
+                                        if let Some(session) = sessions.remove(&cid) {
+                                            let snap = session.stop();
+                                            live_rtp.on_rtp_stop();
+                                            snaps.lock().await.push(snap);
+                                        }
+                                    });
+                                }
+
+                                if matches!(dialog.state, DialogState::Connected | DialogState::Terminating) {
+                                    dialog.on_bye_ok();
+                                    live.on_completed();
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                } // SipEvent::IncomingRequest
+                } // match ev
             }
 
             // ② 掃描逾時 & 應該 BYE 的通話

@@ -166,6 +166,8 @@ impl SipMessage {
     }
 
     /// 最小 SDP
+    /// 固定使用 G.711A（PCMA，PT=8）作為媒體 codec，
+    /// 伺服器通常以 offer 中第一個 codec 為主，明確指定避免協商錯誤。
     fn minimal_sdp(local_ip: &str, rtp_port: u16) -> String {
         let ip = local_ip.split(':').next().unwrap_or(local_ip);
         format!(
@@ -174,9 +176,9 @@ impl SipMessage {
              s=sipress\r\n\
              c=IN IP4 {ip}\r\n\
              t=0 0\r\n\
-             m=audio {port} RTP/AVP 0 8\r\n\
-             a=rtpmap:0 PCMU/8000\r\n\
+             m=audio {port} RTP/AVP 8\r\n\
              a=rtpmap:8 PCMA/8000\r\n\
+             a=ptime:20\r\n\
              a=sendrecv\r\n",
             ip = ip,
             port = rtp_port,
@@ -196,6 +198,73 @@ impl SipMessage {
     /// 產生 Call-ID
     pub fn new_call_id(domain: &str) -> String {
         format!("{}@{}", Uuid::new_v4().simple(), domain)
+    }
+}
+
+/// 建構對伺服器發來請求的 200 OK 回應（RE-INVITE / BYE）
+impl SipMessage {
+    /// 從請求訊息中擷取必要標頭（Via / From / To / Call-ID / CSeq）
+    fn extract_request_headers(raw: &str) -> (String, String, String, String, String) {
+        let (mut vias, mut from, mut to, mut call_id, mut cseq) =
+            (Vec::<String>::new(), String::new(), String::new(), String::new(), String::new());
+        for line in raw.lines() {
+            let lower = line.to_lowercase();
+            if lower.starts_with("via:") || lower.starts_with("v:") {
+                vias.push(line.to_string());
+            } else if from.is_empty() && (lower.starts_with("from:") || lower.starts_with("f:")) {
+                from = line.to_string();
+            } else if to.is_empty() && (lower.starts_with("to:") || lower.starts_with("t:")) {
+                to = line.to_string();
+            } else if call_id.is_empty() && (lower.starts_with("call-id:") || lower.starts_with("i:")) {
+                call_id = line.to_string();
+            } else if cseq.is_empty() && lower.starts_with("cseq:") {
+                cseq = line.to_string();
+            }
+        }
+        let via = vias.join("\r\n");
+        (via, from, to, call_id, cseq)
+    }
+
+    /// 對伺服器發來的 BYE 回應 200 OK（不含 SDP）
+    pub fn ok_for_server_bye(raw_request: &str) -> String {
+        let (via, from, to, call_id, cseq) = Self::extract_request_headers(raw_request);
+        format!(
+            "SIP/2.0 200 OK\r\n\
+             {via}\r\n\
+             {from}\r\n\
+             {to}\r\n\
+             {call_id}\r\n\
+             {cseq}\r\n\
+             Content-Length: 0\r\n\
+             \r\n",
+            via = via, from = from, to = to, call_id = call_id, cseq = cseq,
+        )
+    }
+
+    /// 對伺服器發來的 RE-INVITE 回應 200 OK（含 SDP，維持 PCMA 通話）
+    pub fn ok_for_server_reinvite(raw_request: &str, local_addr: &str, rtp_port: u16) -> String {
+        let (via, from, to, call_id, cseq) = Self::extract_request_headers(raw_request);
+        let sdp     = Self::minimal_sdp(local_addr, rtp_port);
+        let sdp_len = sdp.len();
+        format!(
+            "SIP/2.0 200 OK\r\n\
+             {via}\r\n\
+             {from}\r\n\
+             {to}\r\n\
+             {call_id}\r\n\
+             {cseq}\r\n\
+             Content-Type: application/sdp\r\n\
+             Content-Length: {sdp_len}\r\n\
+             \r\n\
+             {sdp}",
+            via     = via,
+            from    = from,
+            to      = to,
+            call_id = call_id,
+            cseq    = cseq,
+            sdp_len = sdp_len,
+            sdp     = sdp,
+        )
     }
 }
 
@@ -239,16 +308,73 @@ impl SipResponse {
         None
     }
 
-    /// 從 200 OK 的 SDP body 中解析對端 RTP port
-    /// 格式：m=audio <port> RTP/AVP <fmt...>
+    /// 從 200 OK 的 SDP body 中解析對端 RTP 地址（IP:port）
+    /// 同時解析 c= connection line 與 m=audio port，回傳 "ip:port" 字串。
+    /// 若 c= 不存在，以 fallback_ip（SIP server IP）代替。
+    pub fn sdp_rtp_addr(raw: &str, fallback_ip: &str) -> Option<String> {
+        let body_start = raw.find("\r\n\r\n").map(|i| i + 4)
+            .or_else(|| raw.find("\n\n").map(|i| i + 2))?;
+        let body = &raw[body_start..];
+
+        // 解析 c= line（例：c=IN IP4 192.168.1.10）
+        let mut conn_ip = fallback_ip.to_string();
+        // 先掃一輪拿 session-level c=
+        for line in body.lines() {
+            let line = line.trim();
+            if line.starts_with("c=") {
+                // c=IN IP4 <ip>  或  c=IN IP6 <ip>
+                let parts: Vec<&str> = line.splitn(4, ' ').collect();
+                if parts.len() >= 3 {
+                    let ip = parts[2].trim().trim_end_matches('\r');
+                    if !ip.is_empty() && ip != "0.0.0.0" {
+                        conn_ip = ip.to_string();
+                    }
+                }
+                break; // 取第一個 c= (session level)
+            }
+        }
+
+        // 解析 m=audio port（取第一個 audio m= 行）
+        let mut rtp_port: Option<u16> = None;
+        let mut in_audio_section = false;
+        for line in body.lines() {
+            let line = line.trim();
+            if line.starts_with("m=") {
+                in_audio_section = line.starts_with("m=audio");
+                if in_audio_section {
+                    let parts: Vec<&str> = line.splitn(4, ' ').collect();
+                    if parts.len() >= 2 {
+                        if let Ok(p) = parts[1].parse::<u16>() {
+                            rtp_port = Some(p);
+                        }
+                    }
+                }
+            }
+            // media-level c= 覆蓋 session-level（取 audio section 內的 c=）
+            if in_audio_section && line.starts_with("c=") {
+                let parts: Vec<&str> = line.splitn(4, ' ').collect();
+                if parts.len() >= 3 {
+                    let ip = parts[2].trim().trim_end_matches('\r');
+                    if !ip.is_empty() && ip != "0.0.0.0" {
+                        conn_ip = ip.to_string();
+                    }
+                }
+            }
+            if rtp_port.is_some() && in_audio_section {
+                break; // audio section 處理完畢
+            }
+        }
+
+        rtp_port.map(|p| format!("{}:{}", conn_ip, p))
+    }
+
+    /// 從 200 OK 的 SDP body 中解析對端 RTP port（向下相容用，只取 port）
     pub fn sdp_rtp_port(raw: &str) -> Option<u16> {
-        // 找到 SIP header 與 SDP body 的分界（空行）
         let body_start = raw.find("\r\n\r\n").map(|i| i + 4)
             .or_else(|| raw.find("\n\n").map(|i| i + 2))?;
         let body = &raw[body_start..];
         for line in body.lines() {
-            // m=audio PORT proto fmt  或  m=video PORT ...（取第一個 m= 行）
-            if line.starts_with("m=") {
+            if line.trim().starts_with("m=audio") || line.trim().starts_with("m=") {
                 let parts: Vec<&str> = line.splitn(4, ' ').collect();
                 if parts.len() >= 2 {
                     if let Ok(port) = parts[1].parse::<u16>() {

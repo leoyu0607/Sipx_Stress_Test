@@ -1,0 +1,256 @@
+/// SIP REGISTER 訊息建構 + Digest auth (RFC 3261 §22.4 / RFC 2617)
+use md5::{Digest, Md5};
+
+/// REGISTER 訊息建構器
+pub struct RegisterMessage;
+
+impl RegisterMessage {
+    /// 建構 REGISTER 請求
+    /// auth_header: None = 第一次無認證；Some = 收到 401 後重送的 Authorization 標頭
+    #[allow(clippy::too_many_arguments)]
+    pub fn build(
+        username:    &str,
+        domain:      &str,           // SIP From/To URI 中的 domain
+        server:      &str,           // 伺服器 ip:port (Request-URI)
+        local_addr:  &str,           // 本機綁定 ip:port
+        cseq:        u32,
+        branch:      &str,
+        from_tag:    &str,
+        call_id:     &str,
+        transport:   &str,           // "UDP" / "TCP"
+        expires:     u32,            // 註冊有效秒數
+        auth_header: Option<&str>,   // Authorization header value
+    ) -> String {
+        let auth_line = auth_header
+            .map(|h| format!("Authorization: {}\r\n", h))
+            .unwrap_or_default();
+
+        format!(
+            "REGISTER sip:{server} SIP/2.0\r\n\
+             Via: SIP/2.0/{tp} {local};branch={branch};rport\r\n\
+             Max-Forwards: 70\r\n\
+             From: <sip:{user}@{domain}>;tag={tag}\r\n\
+             To: <sip:{user}@{domain}>\r\n\
+             Call-ID: {call_id}\r\n\
+             CSeq: {cseq} REGISTER\r\n\
+             Contact: <sip:{user}@{local};transport={tplow}>;expires={expires}\r\n\
+             Expires: {expires}\r\n\
+             {auth_line}\
+             User-Agent: sipress/0.1\r\n\
+             Allow: INVITE,ACK,BYE,CANCEL,OPTIONS,REGISTER\r\n\
+             Content-Length: 0\r\n\
+             \r\n",
+            server    = server,
+            tp        = transport,
+            tplow     = transport.to_lowercase(),
+            local     = local_addr,
+            branch    = branch,
+            user      = username,
+            domain    = domain,
+            tag       = from_tag,
+            call_id   = call_id,
+            cseq      = cseq,
+            expires   = expires,
+            auth_line = auth_line,
+        )
+    }
+}
+
+// ─── Digest 認證質詢解析 ──────────────────────────────────────────
+
+/// 從 401 / 407 回應解析的 Digest challenge
+#[derive(Debug, Clone)]
+pub struct DigestChallenge {
+    pub realm:     String,
+    pub nonce:     String,
+    pub algorithm: String,           // 通常 "MD5"
+    pub qop:       Option<String>,   // "auth" / "auth-int" / None
+    pub opaque:    Option<String>,
+}
+
+impl DigestChallenge {
+    /// 從原始 401/407 回應解析
+    pub fn parse(raw: &str) -> Option<Self> {
+        // 找 WWW-Authenticate 或 Proxy-Authenticate
+        let mut auth_value = String::new();
+        let mut joining = false;
+        for line in raw.lines() {
+            let lower = line.to_lowercase();
+            if lower.starts_with("www-authenticate:") || lower.starts_with("proxy-authenticate:") {
+                let val = line.splitn(2, ':').nth(1)?.trim();
+                auth_value = val.to_string();
+                joining = true;
+            } else if joining && (line.starts_with(' ') || line.starts_with('\t')) {
+                // 多行延續
+                auth_value.push(' ');
+                auth_value.push_str(line.trim());
+            } else if joining {
+                break;
+            }
+        }
+        if auth_value.is_empty() {
+            return None;
+        }
+
+        // 移除 "Digest" 前綴
+        let after_digest = auth_value
+            .strip_prefix("Digest")
+            .or_else(|| auth_value.strip_prefix("digest"))?
+            .trim();
+
+        let mut realm = String::new();
+        let mut nonce = String::new();
+        let mut algorithm = "MD5".to_string();
+        let mut qop = None;
+        let mut opaque = None;
+
+        for part in split_quoted_csv(after_digest) {
+            let mut kv = part.splitn(2, '=');
+            let k = kv.next().map(str::trim).unwrap_or("");
+            let v_raw = kv.next().map(str::trim).unwrap_or("");
+            let v = v_raw.trim_matches('"');
+            match k.to_lowercase().as_str() {
+                "realm"     => realm = v.to_string(),
+                "nonce"     => nonce = v.to_string(),
+                "algorithm" => algorithm = v.to_string(),
+                "qop"       => qop = Some(v.to_string()),
+                "opaque"    => opaque = Some(v.to_string()),
+                _ => {}
+            }
+        }
+
+        if realm.is_empty() || nonce.is_empty() {
+            return None;
+        }
+        Some(Self { realm, nonce, algorithm, qop, opaque })
+    }
+
+    /// 計算 response 並建構 Authorization header value
+    pub fn build_authorization(
+        &self,
+        username: &str,
+        password: &str,
+        method:   &str,        // 通常 "REGISTER"
+        uri:      &str,        // 例 "sip:server-ip:5060"
+    ) -> String {
+        let ha1 = md5_hex(&format!("{}:{}:{}", username, self.realm, password));
+        let ha2 = md5_hex(&format!("{}:{}", method, uri));
+
+        let (response, qop_part, nc_part, cnonce_part) = if let Some(qop_full) = &self.qop {
+            // 取 qop 第一個值（"auth, auth-int" → "auth"）
+            let qop_val = qop_full.split(',').next().unwrap_or("auth").trim();
+            let nc = "00000001";
+            let cnonce = format!("{:08x}", rand::random::<u32>());
+            let resp = md5_hex(&format!(
+                "{}:{}:{}:{}:{}:{}",
+                ha1, self.nonce, nc, cnonce, qop_val, ha2
+            ));
+            (
+                resp,
+                format!(", qop={}", qop_val),
+                format!(", nc={}", nc),
+                format!(", cnonce=\"{}\"", cnonce),
+            )
+        } else {
+            // RFC 2069 fallback：response = MD5(HA1:nonce:HA2)
+            let resp = md5_hex(&format!("{}:{}:{}", ha1, self.nonce, ha2));
+            (resp, String::new(), String::new(), String::new())
+        };
+
+        let opaque_part = self
+            .opaque
+            .as_ref()
+            .map(|o| format!(", opaque=\"{}\"", o))
+            .unwrap_or_default();
+
+        format!(
+            "Digest username=\"{user}\", realm=\"{realm}\", nonce=\"{nonce}\", \
+             uri=\"{uri}\", response=\"{resp}\", algorithm={algo}{qop}{nc}{cnonce}{op}",
+            user   = username,
+            realm  = self.realm,
+            nonce  = self.nonce,
+            uri    = uri,
+            resp   = response,
+            algo   = self.algorithm,
+            qop    = qop_part,
+            nc     = nc_part,
+            cnonce = cnonce_part,
+            op     = opaque_part,
+        )
+    }
+}
+
+// ─── helpers ─────────────────────────────────────────────────────
+
+fn md5_hex(s: &str) -> String {
+    let mut h = Md5::new();
+    h.update(s.as_bytes());
+    let out = h.finalize();
+    let mut s = String::with_capacity(32);
+    for b in out.iter() {
+        s.push_str(&format!("{:02x}", b));
+    }
+    s
+}
+
+/// 拆 "key=val, key=\"val,with,comma\"" 為 Vec<String>
+/// 引號內的逗號不視為分隔符
+fn split_quoted_csv(s: &str) -> Vec<String> {
+    let mut result = Vec::new();
+    let mut cur = String::new();
+    let mut in_quote = false;
+    for c in s.chars() {
+        match c {
+            '"' => {
+                in_quote = !in_quote;
+                cur.push(c);
+            }
+            ',' if !in_quote => {
+                let t = cur.trim().to_string();
+                if !t.is_empty() {
+                    result.push(t);
+                }
+                cur.clear();
+            }
+            _ => cur.push(c),
+        }
+    }
+    let t = cur.trim().to_string();
+    if !t.is_empty() {
+        result.push(t);
+    }
+    result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_digest_challenge() {
+        let raw = "SIP/2.0 401 Unauthorized\r\n\
+                   Via: SIP/2.0/UDP 1.2.3.4:5060\r\n\
+                   WWW-Authenticate: Digest realm=\"sip.example.com\", \
+                   nonce=\"abc123\", algorithm=MD5, qop=\"auth\"\r\n\
+                   \r\n";
+        let c = DigestChallenge::parse(raw).expect("should parse");
+        assert_eq!(c.realm, "sip.example.com");
+        assert_eq!(c.nonce, "abc123");
+        assert_eq!(c.algorithm, "MD5");
+        assert_eq!(c.qop.as_deref(), Some("auth"));
+    }
+
+    #[test]
+    fn build_auth_response() {
+        let c = DigestChallenge {
+            realm:     "sip.example.com".into(),
+            nonce:     "abc123".into(),
+            algorithm: "MD5".into(),
+            qop:       None,
+            opaque:    None,
+        };
+        let h = c.build_authorization("alice", "secret", "REGISTER", "sip:1.2.3.4:5060");
+        assert!(h.contains("username=\"alice\""));
+        assert!(h.contains("response=\""));
+    }
+}
