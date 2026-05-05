@@ -51,6 +51,37 @@ impl SipParser {
         Self::header_value(raw, &["contact", "m"])
     }
 
+    /// 從 Contact header 取出 SIP URI（剝除角括號與參數）
+    pub fn contact_uri(raw: &str) -> Option<String> {
+        let val = Self::header_value(raw, &["contact", "m"])?;
+        // <sip:user@host:port;params> → sip:user@host:port
+        if let Some(start) = val.find('<') {
+            if let Some(end_rel) = val[start..].find('>') {
+                return Some(val[start + 1..start + end_rel].to_string());
+            }
+        }
+        // Plain URI（無角括號），去掉 ;params
+        Some(val.split(';').next().unwrap_or(&val).trim().to_string())
+    }
+
+    /// 從 200 OK SDP body 解析對端 RTP port（m=audio PORT ...）
+    pub fn sdp_rtp_port(raw: &str) -> Option<u16> {
+        let body_start = raw.find("\r\n\r\n").map(|i| i + 4)
+            .or_else(|| raw.find("\n\n").map(|i| i + 2))?;
+        let body = &raw[body_start..];
+        for line in body.lines() {
+            if line.starts_with("m=") {
+                let parts: Vec<&str> = line.splitn(4, ' ').collect();
+                if parts.len() >= 2 {
+                    if let Ok(port) = parts[1].parse::<u16>() {
+                        return Some(port);
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// 取得 Content-Length
     pub fn content_length(raw: &str) -> Option<usize> {
         let val = Self::header_value(raw, &["content-length", "l"])?;

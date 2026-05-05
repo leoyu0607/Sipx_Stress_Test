@@ -1,6 +1,7 @@
 /// 指標收集：ASR / ACD / PDD / 延遲直方圖
 use hdrhistogram::Histogram;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::{
     atomic::{AtomicU64, Ordering},
     Mutex,
@@ -115,15 +116,16 @@ pub struct DetailedStats {
     /// 通話持續時間分佈（µs）
     pub dur_hist: Mutex<Histogram<u64>>,
 
-    // 錯誤碼分類
+    // 錯誤碼分類（粗分）
     pub fail_4xx: AtomicU64,
     pub fail_5xx: AtomicU64,
     pub fail_6xx: AtomicU64,
+    // 每個具體錯誤碼的計數（細分）
+    pub fail_codes: Mutex<HashMap<u16, u64>>,
 }
 
 impl Default for DetailedStats {
     fn default() -> Self {
-        // 最大 60 秒，精度 3 位有效數字
         let make = || Histogram::<u64>::new_with_bounds(1, 60_000_000, 3).unwrap();
         Self {
             pdd_hist:   Mutex::new(make()),
@@ -132,6 +134,7 @@ impl Default for DetailedStats {
             fail_4xx:   AtomicU64::new(0),
             fail_5xx:   AtomicU64::new(0),
             fail_6xx:   AtomicU64::new(0),
+            fail_codes: Mutex::new(HashMap::new()),
         }
     }
 }
@@ -161,13 +164,16 @@ impl DetailedStats {
         }
     }
 
-    /// 依狀態碼分類記錄失敗
+    /// 依狀態碼分類記錄失敗（粗分 + 細分）
     pub fn record_fail_code(&self, code: u16) {
         match code {
             400..=499 => { self.fail_4xx.fetch_add(1, Ordering::Relaxed); }
             500..=599 => { self.fail_5xx.fetch_add(1, Ordering::Relaxed); }
             600..=699 => { self.fail_6xx.fetch_add(1, Ordering::Relaxed); }
             _ => {}
+        }
+        if let Ok(mut map) = self.fail_codes.lock() {
+            *map.entry(code).or_insert(0) += 1;
         }
     }
 }
@@ -216,17 +222,20 @@ pub struct FinalReport {
 
     // ── RTP 聲音品質 ──
     /// MOS 估算（1.0 ~ 5.0，None = 未啟用 RTP）
-    pub mos:           Option<f64>,
+    pub mos:              Option<f64>,
     /// 掉包率（%）
-    pub loss_rate_pct: Option<f64>,
+    pub loss_rate_pct:    Option<f64>,
     /// Jitter（ms）
-    pub jitter_ms:     Option<f64>,
+    pub jitter_ms:        Option<f64>,
     /// 傳送 RTP 封包數
-    pub rtp_sent:      Option<u64>,
+    pub rtp_sent:         Option<u64>,
     /// 接收 RTP 封包數
-    pub rtp_recv:      Option<u64>,
+    pub rtp_recv:         Option<u64>,
     /// 亂序封包數
     pub rtp_out_of_order: Option<u64>,
+
+    // ── 具體失敗回應碼（key = SIP 狀態碼，value = 次數）──
+    pub fail_codes: HashMap<u16, u64>,
 }
 
 impl FinalReport {
