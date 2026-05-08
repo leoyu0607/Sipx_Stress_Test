@@ -1018,14 +1018,24 @@ logs/YYYYMMDD_HHMMSS_agent.sip.log
 
 ```rust
 pub fn build(
-    username, domain, server, local_addr,
+    username, _domain, server, local_addr,
     cseq, branch, from_tag, call_id,
     transport, expires,
     auth_header: Option<&str>,   // 第一次 None；401 後 Some("Digest username=...")
 ) -> String
 ```
 
-包含 `Contact: <sip:user@local;transport=udp>;expires=N` 與 `Allow: ...,REGISTER`，否則部分軟交換機會拒絕。
+**與 SIPp 對齊的格式**（修正前有多處差異導致部分 PBX 不認帳號）：
+
+| 項目 | 修正前 | 修正後（對齊 SIPp） |
+|------|--------|---------------------|
+| From/To domain | `sip:user@{ip}`（不含 port） | `sip:user@{ip:port}`（含 port） |
+| Contact | `<sip:user@addr;transport=udp>;expires=N` | `<sip:user@addr>`（簡潔格式） |
+| Allow | 6 個方法 | 14 個方法（含 INFO, PRACK, NOTIFY, SUBSCRIBE 等） |
+| Allow-Events | 缺少 | `talk,hold,conference,refer,check-sync` |
+| Expires | 600 | 240（與 SIPp 一致） |
+
+`_domain` 參數保留但不使用（避免改動所有呼叫端），From/To 統一用 `server`（含 ip:port）作為 domain。
 
 ### DigestChallenge
 

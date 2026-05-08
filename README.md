@@ -261,8 +261,8 @@ extension,username,password,domain
 | `INVITE` 新通話 | `100 Trying` → `180 Ringing` → `200 OK` + SDP（PCMA）；啟動真實 RTP（若 enable_rtp） |
 | `INVITE` （已建立 dialog） | RE-INVITE 視為保活，回 `200 OK` + SDP；更新 RTP 目標地址 |
 | `ACK` | 標記通話已建立（10s 未收到 → 座席主動 BYE） |
-| `BYE` | `200 OK`，停止 RTP，計入 calls_completed |
-| （BYE timeout） | 通話 150s 未收到 BYE → 座席主動送 BYE 掛斷 |
+| `BYE` | `200 OK`，停止 RTP，計入 calls_completed，**自動 re-REGISTER 維持在線** |
+| （BYE timeout） | 通話 150s 未收到 BYE → 座席主動送 BYE 掛斷，re-REGISTER |
 | `CANCEL` | `200 OK`（CANCEL）+ `487 Request Terminated`（INVITE） |
 | `OPTIONS` | `200 OK`（健康檢查） |
 
@@ -678,8 +678,8 @@ RTP 品質統計，所有計算均符合 RFC 3550 標準：
 4. **等待 ACK**：10s 未收到 ACK → 座席主動 BYE
 5. **真實 RTP**：啟動 `RtpSession` 收發 G.711A 音訊（若 `enable_rtp`），收集 MOS / 掉包 / Jitter
 6. **保活**：收到 RE-INVITE（Session-Expires）→ 200 OK + SDP + 更新 RTP 目標地址
-7. **掛斷**：收到 BYE → 200 OK → 停止 RTP；150s timeout → 主動 BYE
-8. **通話後 re-REGISTER**：每次通話結束後自動 re-REGISTER 維持在線
+7. **掛斷**：收到 BYE → 200 OK → 停止 RTP → **自動 re-REGISTER**；150s timeout → 主動 BYE → re-REGISTER
+8. **通話後 re-REGISTER**：每次通話結束（無論伺服器 BYE 或座席 timeout BYE）都自動 re-REGISTER 維持在線，確保交換機持續分配來電
 9. **CANCEL / OPTIONS**：自動處理（487 / 200 OK）
 10. **結束**：收到外部停止訊號 → REGISTER Expires=0 → exit
 11. **完成通知**：主迴圈結束後設定 `engine_finished` → `StatsSnapshot.finished = true`，前端自動停止
@@ -687,7 +687,7 @@ RTP 品質統計，所有計算均符合 RFC 3550 標準：
 ### `core/src/sip/register.rs`
 
 REGISTER 訊息建構 + RFC 2617 Digest auth：
-- `RegisterMessage::build()` — REGISTER 訊息，可選夾帶 `Authorization`
+- `RegisterMessage::build()` — REGISTER 訊息，可選夾帶 `Authorization`。From/To domain 使用完整 `server:port`（與 SIPp 一致），Contact 為簡潔 `<sip:user@ip:port>`（不帶 transport 參數），包含完整 `Allow`（14 個方法）與 `Allow-Events: talk,hold,conference,refer,check-sync`
 - `DigestChallenge::parse()` — 從 401/407 回應解析 `realm/nonce/algorithm/qop/opaque`
 - `DigestChallenge::build_authorization()` — 計算 MD5 response 並產生 `Authorization` header
 
