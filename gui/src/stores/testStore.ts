@@ -140,7 +140,7 @@ function nowTs() {
 export const useTestStore = defineStore('test', () => {
 
   const config = ref<TestConfig>({
-    server: '192.168.1.100:5060',
+    server: '192.168.166.60:5066',
     transport: 'UDP',
     localPort: 5070,
     duration: 60,
@@ -148,7 +148,7 @@ export const useTestStore = defineStore('test', () => {
     verbose: false,
     mode: 'caller',
     caller: {
-      accessNumber: '4008001234',
+      accessNumber: '0938530031',
       calleeFixed:  '',
       calleePrefix: '2',
       calleeRange:  9999,
@@ -162,7 +162,7 @@ export const useTestStore = defineStore('test', () => {
     agent: {
       count: 0,
       accounts: [],
-      defaultDomain: '192.168.1.100',
+      defaultDomain: '192.168.166.60',
     },
   })
 

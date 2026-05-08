@@ -37,6 +37,7 @@ pub struct RtpSessionConfig {
 pub struct RtpSession {
     pub stats:      Arc<RtpStats>,
     stop_flag:      Arc<AtomicBool>,
+    socket:         Arc<UdpSocket>,
     local_rtp_port: u16,
 }
 
@@ -122,11 +123,10 @@ impl RtpSession {
 
                     let pkt   = RtpPacket::new(payload_type, seq, ts, ssrc, frame.clone());
                     let bytes = pkt.encode();
-                    stats.on_send(frame.len());
 
-                    if let Err(e) = socket.send(&bytes).await {
-                        debug!("RTP 傳送失敗: {}", e);
-                        break;
+                    match socket.send(&bytes).await {
+                        Ok(_)  => stats.on_send(frame.len()),
+                        Err(e) => { debug!("RTP 傳送失敗: {}", e); break; }
                     }
 
                     seq = seq.wrapping_add(1);
@@ -163,13 +163,20 @@ impl RtpSession {
             });
         }
 
-        Ok(Self { stats, stop_flag, local_rtp_port: local_port })
+        Ok(Self { stats, stop_flag, socket, local_rtp_port: local_port })
     }
 
     /// 停止 RTP session，回傳統計快照
     pub fn stop(&self) -> RtpStatsSnapshot {
         self.stop_flag.store(true, Ordering::Relaxed);
         self.stats.snapshot()
+    }
+
+    /// RE-INVITE 後更新 RTP 對端地址（connected UDP socket 重新 connect 即可切換目標）
+    pub async fn update_remote(&self, new_addr: &str) -> anyhow::Result<()> {
+        self.socket.connect(new_addr).await
+            .with_context(|| format!("RE-INVITE 後無法切換 RTP 對端: {}", new_addr))?;
+        Ok(())
     }
 
     /// 本機 RTP port

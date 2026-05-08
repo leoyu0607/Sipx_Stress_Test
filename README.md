@@ -168,8 +168,8 @@ UAC (sipress)              UAS (軟交換機)
      │═══ RTP G.711 音訊流 ════▶│  每 20ms 一個 160-byte PCMU/PCMA frame
      │◀══ RTP G.711 音訊流 ═════│  計算 Jitter / 掉包 / MOS（RFC 3550 §A.3/§A.8）
      │                          │
-     │◀─── RE-INVITE ───────────│  Session-Expires 會話刷新
-     │──── 200 OK + SDP ───────▶│  自動回應保活（避免被掛斷）
+     │◀─── RE-INVITE ───────────│  Session-Expires 會話刷新（可能變更 RTP port）
+     │──── 200 OK + SDP ───────▶│  自動回應保活 + 解析新 SDP 更新 RTP 目標地址
      │                          │
      │──── BYE ────────────────▶│  通話持續時間計時結束，停止 RTP
      │◀─── 200 OK ──────────────│
@@ -570,9 +570,10 @@ npm run tauri dev   # 開啟視窗，hot-reload 前端
 - **接收 task**：單一 UDP recv 迴圈，以 `SipParser`（支援 compact form）**區分 SIP 回應與請求**；回應（`Response`）與伺服器主動請求（`IncomingRequest`）分別送至 channel
 - **進度 task**：每秒觸發 `on_progress` callback（TUI / GUI 更新）
 - **主控迴圈**：處理 SIP 事件 → 掃描逾時 → 依 CPS 發起新通話 → 判斷結束
+- **Graceful Stop**：透過 `stop_handle()` 回傳 `watch::Sender<bool>`，外部呼叫 `.send(true)` 後引擎停止發起新通話，對所有 `Connected` 通話發 BYE、`Calling/Trying/Ringing` 通話發 CANCEL，等待 BYE 回應後才產生最終報告
 - RTP session 在收到 200 OK 後啟動（傳入 `pre_bound` 預分配 socket），BYE 後停止並收集統計
 - 2xx ACK 使用 Contact URI 作為 Request-URI；non-2xx ACK 使用原始 INVITE branch
-- 收到伺服器 RE-INVITE（Session-Expires）→ 自動 200 OK 保活；收到伺服器 BYE → 自動 200 OK
+- 收到伺服器 RE-INVITE（Session-Expires）→ 自動 200 OK 保活，並解析 SDP 更新 RTP 目標地址（避免對端換 port 後音訊送錯）；收到伺服器 BYE → 自動 200 OK
 
 ### `core/src/sip/message.rs`
 
@@ -617,12 +618,15 @@ engine 主控迴圈（收到 200 OK 後）:
 
 `allocate_port()` 回傳 `(u16, UdpSocket)`（port 號 + 已綁定 socket），確保從分配到啟動期間 port 不被系統回收。
 
+`update_remote(new_addr)` 方法可在 RE-INVITE 後動態切換 RTP 送出目標（對 connected UDP socket 重新 `connect()`），確保對端換 port 後音訊不會送到舊地址。
+
 ### `core/src/rtp/stats.rs`
 
 RTP 品質統計，所有計算均符合 RFC 3550 標準：
 - **Jitter**（RFC 3550 §A.8）：EWMA 指數加權移動平均，8kHz clock 單位
-- **掉包率**（RFC 3550 §A.3）：以序號空間計算，追蹤 `first_seq`、`max_seq`、`seq_cycles`（wrap-around 計數），確保長時通話中序號回繞仍能正確統計 `expected` 封包數
+- **掉包率**（RFC 3550 §A.3）：以序號空間計算，追蹤 `first_seq`、`max_seq`、`seq_cycles`（wrap-around 計數），確保長時通話中序號回繞仍能正確統計 `expected` 封包數。**當完全未收到對端 RTP 但已成功送出封包時，以 sent 為基準回報 100% loss**（避免零收包被誤判為「無損 → MOS 優良」）
 - **MOS**（ITU-T E-Model G.107）：由掉包率與 Jitter 估算 G.711 通話品質分數（1.0 ~ 5.0）
+- **on_send 計數**：僅在 `socket.send()` 成功後才計入，避免送失敗的封包被計為已送出
 
 **TOCTOU 修正**：`allocate_port()` 現在回傳已綁定的 `(port, UdpSocket)` 而非只有 port number，消除「測試 bind → 釋放 → RtpSession 再 bind」之間的 race window。Engine 在 INVITE 前呼叫 `allocate_port()` 並將 socket 暫存於 `pre_bound_rtp: HashMap<call_id, UdpSocket>`；收到 200 OK 後直接移交給 `RtpSession::start(pre_bound)` 使用。
 
@@ -633,7 +637,7 @@ RTP 品質統計，所有計算均符合 RFC 3550 標準：
 | Command | 說明 |
 |---------|------|
 | `start_test(config)` | 啟動壓測（背景非同步，立即回傳）。依 `config.mode` 自動分派到 `Engine`（Caller）或 `AgentEngine`（Agent） |
-| `stop_test()` | 手動停止；座席模式停止時會自動發 `REGISTER Expires=0` 解除註冊 |
+| `stop_test()` | 手動停止（graceful）；民眾模式會對所有進行中通話發 BYE / 未接通的發 CANCEL；座席模式會發 `REGISTER Expires=0` 解除註冊 |
 | `get_snapshot()` | 取得即時 `StatsSnapshot`（前端每秒輪詢） |
 | `get_report()` | 取得最終 `FinalReport`（壓測完成後） |
 | `get_html_report(server_addr, timestamp)` | 產生 HTML 報告字串（前端下載為 `.html` 檔）；`server_addr` 會顯示在報告標頭 |

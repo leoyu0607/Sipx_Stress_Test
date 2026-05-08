@@ -57,24 +57,32 @@ pub async fn start_test(
     tokio::spawn(async move {
         let result = match mode {
             Mode::Caller => {
-                let engine = Engine::new(config);
-                tokio::select! {
-                    r = engine.run(Some(on_progress)) => r,
-                    _ = stop_rx.recv() => {
-                        tracing::info!("壓測被手動停止");
-                        return;
+                let engine      = Engine::new(config);
+                let stop_handle = engine.stop_handle();
+                let forward = tokio::spawn(async move {
+                    if stop_rx.recv().await.is_some() {
+                        tracing::info!("壓測收到停止訊號 → 觸發 graceful BYE/CANCEL");
+                        let _ = stop_handle.send(true);
                     }
-                }
+                });
+                let r = engine.run(Some(on_progress)).await;
+                forward.abort();
+                r
             }
             Mode::Agent => {
-                let engine = AgentEngine::new(config);
-                tokio::select! {
-                    r = engine.run(Some(on_progress)) => r,
-                    _ = stop_rx.recv() => {
-                        tracing::info!("座席壓測被手動停止");
-                        return;
+                let engine      = AgentEngine::new(config);
+                let stop_handle = engine.stop_handle();
+                // 將前端的 stop 訊號轉發成 watch::Sender(true)
+                // 讓 AgentEngine 可以走完 graceful stop（REGISTER Expires=0 + drain）
+                let forward = tokio::spawn(async move {
+                    if stop_rx.recv().await.is_some() {
+                        tracing::info!("座席壓測收到停止訊號 → 觸發 graceful deregister");
+                        let _ = stop_handle.send(true);
                     }
-                }
+                });
+                let r = engine.run(Some(on_progress)).await;
+                forward.abort();
+                r
             }
         };
         match result {

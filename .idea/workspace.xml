@@ -19,14 +19,6 @@
   <component name="ChangeListManager">
     <list default="true" id="85702eed-47e3-4cc2-8831-bbca1be3dbbc" name="Changes" comment="Update configuration for SIP stress testing and add .claude to .gitignore">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/cli/src/args.rs" beforeDir="false" afterPath="$PROJECT_DIR$/cli/src/args.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/core/src/engine.rs" beforeDir="false" afterPath="$PROJECT_DIR$/core/src/engine.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/core/src/rtp/audio.rs" beforeDir="false" afterPath="$PROJECT_DIR$/core/src/rtp/audio.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/core/src/rtp/session.rs" beforeDir="false" afterPath="$PROJECT_DIR$/core/src/rtp/session.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/core/src/sip/message.rs" beforeDir="false" afterPath="$PROJECT_DIR$/core/src/sip/message.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/core/src/stats.rs" beforeDir="false" afterPath="$PROJECT_DIR$/core/src/stats.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/gui/src/components/RightPanel.vue" beforeDir="false" afterPath="$PROJECT_DIR$/gui/src/components/RightPanel.vue" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/gui/src/stores/testStore.ts" beforeDir="false" afterPath="$PROJECT_DIR$/gui/src/stores/testStore.ts" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -52,6 +44,9 @@
 }</component>
   <component name="MacroExpansionManager">
     <option name="directoryName" value="Ilw2652H" />
+  </component>
+  <component name="ProblemsViewState">
+    <option name="selectedTabId" value="ProjectErrors" />
   </component>
   <component name="ProjectColorInfo">{
   &quot;associatedIndex&quot;: 2
@@ -132,7 +127,7 @@
       <workItem from="1777560910099" duration="12778000" />
       <workItem from="1777624094018" duration="8838000" />
       <workItem from="1777865286728" duration="4917000" />
-      <workItem from="1777885379381" duration="1903000" />
+      <workItem from="1777885379381" duration="3870000" />
     </task>
     <task id="LOCAL-00001" summary="Add initial project structure and core modules for SIP stress testing">
       <option name="closed" value="true" />

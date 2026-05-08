@@ -4,7 +4,7 @@ use crate::rtp::{
     session::{RtpSession, RtpSessionConfig},
     stats::RtpStatsSnapshot,
 };
-use crate::sip::{Dialog, DialogState, SharedUdpSocket, SipMessage, SipParser};
+use crate::sip::{Dialog, DialogState, SharedUdpSocket, SipMessage, SipParser, SipResponse};
 use crate::sip_logger::{Direction, SipLogger, SipRole};
 use crate::stats::{DetailedStats, FinalReport, LiveStats, StatsSnapshot};
 use anyhow::Result;
@@ -14,7 +14,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::net::UdpSocket as TokioUdpSocket;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, watch, Mutex};
 use tokio::time;
 use tracing::{debug, warn};
 
@@ -22,6 +22,7 @@ pub type ProgressCallback = Arc<dyn Fn(StatsSnapshot, f64) + Send + Sync>;
 
 pub struct Engine {
     config: Config,
+    stop_tx: watch::Sender<bool>,
 }
 
 /// 內部事件：從接收 task 發給對話管理 task
@@ -48,7 +49,12 @@ enum SipEvent {
 
 impl Engine {
     pub fn new(config: Config) -> Self {
-        Self { config }
+        let (stop_tx, _) = watch::channel(false);
+        Self { config, stop_tx }
+    }
+
+    pub fn stop_handle(&self) -> watch::Sender<bool> {
+        self.stop_tx.clone()
     }
 
     pub async fn run(
@@ -212,11 +218,19 @@ impl Engine {
         };
         let invite_to = cfg.invite_timeout();
         let call_dur  = Duration::from_secs(cfg.call_duration_secs);
+        let stop_rx = self.stop_tx.subscribe();
+        let mut stopped = false;
 
         let mut next_call = Instant::now();
 
         loop {
             let now = Instant::now();
+
+            // 檢查外部停止訊號
+            if !stopped && stop_rx.has_changed().unwrap_or(false) {
+                stopped = true;
+                sip_log.log_event("ENGINE", "收到停止訊號，開始 graceful shutdown");
+            }
 
             // ① 處理所有收到的 SIP 事件（回應 / 伺服器請求）
             while let Ok(ev) = ev_rx.try_recv() {
@@ -406,6 +420,22 @@ impl Engine {
                                     log_ok.log_message(Direction::Send, &ok_copy, &server);
                                     let _ = udp_ok.send(&ok_copy).await;
                                 });
+
+                                // 解析 RE-INVITE SDP 中的新 RTP 地址，更新 RTP session 目標
+                                if cfg.enable_rtp {
+                                    let sip_ip = cfg.server_addr.split(':').next().unwrap_or("127.0.0.1");
+                                    if let Some(new_rtp_addr) = SipResponse::sdp_rtp_addr(&req_raw, sip_ip) {
+                                        let sessions = rtp_sessions.lock().await;
+                                        if let Some(session) = sessions.get(&call_id) {
+                                            match session.update_remote(&new_rtp_addr).await {
+                                                Ok(()) => sip_log.log_event(&call_id,
+                                                    &format!("RE-INVITE RTP 目標更新 → {}", new_rtp_addr)),
+                                                Err(e) => sip_log.log_event(&call_id,
+                                                    &format!("RE-INVITE RTP 更新失敗: {}", e)),
+                                            }
+                                        }
+                                    }
+                                }
                             }
                             "BYE" => {
                                 // 伺服器主動掛斷 → 200 OK 並結束本通話
@@ -550,11 +580,11 @@ impl Engine {
                 ));
             }
 
-            // ③ 發起新通話
+            // ③ 發起新通話（停止中不再發起）
             let total_limit_reached = cfg.max_total_calls
                 .map_or(false, |max| live.calls_initiated.load(std::sync::atomic::Ordering::Relaxed) >= max);
 
-            if !total_limit_reached && now >= next_call && now < deadline {
+            if !stopped && !total_limit_reached && now >= next_call && now < deadline {
                 let concurrent = {
                     let dialogs = dialogs.lock().await;
                     dialogs.values().filter(|d| matches!(
@@ -629,12 +659,72 @@ impl Engine {
                 }
             }
 
-            // ④ 測試結束條件
+            // ④ 測試結束條件（含手動停止）
             let all_done = total_limit_reached
                 && live.calls_active.load(std::sync::atomic::Ordering::Relaxed) <= 0;
 
-            if now >= deadline || all_done {
-                // 等待剩餘通話結束（最多 invite_timeout 秒，替換原本硬寫的 2 秒）
+            if now >= deadline || all_done || stopped {
+                // 對所有進行中通話發 BYE / 未接通的發 CANCEL
+                {
+                    let mut dialogs = dialogs.lock().await;
+                    let mut to_send: Vec<String> = Vec::new();
+                    let local_domain = local_domain_owned.as_str();
+
+                    for dialog in dialogs.values_mut() {
+                        match &dialog.state {
+                            DialogState::Calling | DialogState::Trying | DialogState::Ringing => {
+                                let cancel = SipMessage::cancel(
+                                    &dialog.call_id,
+                                    &cfg.caller_number,
+                                    local_domain,
+                                    &dialog.callee,
+                                    &cfg.server_addr,
+                                    &local_addr,
+                                    dialog.cseq,
+                                    &dialog.branch,
+                                    &dialog.from_tag,
+                                    "UDP",
+                                );
+                                to_send.push(cancel);
+                                dialog.on_timeout();
+                                live.on_timeout();
+                            }
+                            DialogState::Connected => {
+                                let bye_branch = SipMessage::new_branch();
+                                let bye = SipMessage::bye(
+                                    &dialog.call_id,
+                                    &cfg.caller_number,
+                                    local_domain,
+                                    &dialog.callee,
+                                    dialog.to_tag.as_deref().unwrap_or(""),
+                                    &cfg.server_addr,
+                                    &local_addr,
+                                    dialog.cseq + 1,
+                                    &bye_branch,
+                                    &dialog.from_tag,
+                                    "UDP",
+                                    dialog.remote_contact.as_deref(),
+                                );
+                                to_send.push(bye);
+                                dialog.on_bye_sent();
+                            }
+                            _ => {}
+                        }
+                    }
+
+                    for msg in to_send {
+                        let udp_s   = Arc::clone(&udp);
+                        let log_s   = Arc::clone(&sip_log);
+                        let server  = cfg.server_addr.clone();
+                        let msg_log = msg.clone();
+                        tokio::spawn(async move {
+                            log_s.log_message(Direction::Send, &msg_log, &server);
+                            let _ = udp_s.send(&msg_log).await;
+                        });
+                    }
+                }
+
+                // 等待 BYE 回應（最多 invite_timeout 秒）
                 let drain_deadline = Instant::now() + invite_to;
                 loop {
                     let active = live.calls_active.load(std::sync::atomic::Ordering::Relaxed);

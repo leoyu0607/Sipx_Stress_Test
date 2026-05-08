@@ -5,7 +5,7 @@ use anyhow::Result;
 use args::Args;
 use clap::Parser;
 use sipress_core::{
-    config::{Config, Transport},
+    config::{Config, Mode, Transport},
     engine::{Engine, ProgressCallback},
     html_reporter::HtmlReporter,
     reporter::{OutputFormat, Reporter},
@@ -55,6 +55,8 @@ async fn main() -> Result<()> {
         audio_file:           args.audio_file.clone(),
         enable_rtp:           args.enable_rtp,
         max_total_calls:      if args.max_calls > 0 { Some(args.max_calls) } else { None },
+        mode:                 Mode::Caller,
+        agent_accounts:       Vec::new(),
     };
 
     let engine = Engine::new(config.clone());

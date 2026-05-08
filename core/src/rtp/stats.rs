@@ -42,7 +42,7 @@ impl RtpStats {
         Self::default()
     }
 
-    /// 記錄傳送事件
+    /// 記錄傳送成功事件（應在 socket.send() 成功後呼叫）
     pub fn on_send(&self, payload_size: usize) {
         self.sent_packets.fetch_add(1, Ordering::Relaxed);
         self.sent_bytes.fetch_add(payload_size as u64, Ordering::Relaxed);
@@ -110,7 +110,9 @@ impl RtpStats {
 
     /// 掉包率（0.0 ~ 1.0）
     /// 依接收端序號空間計算：(expected - received) / expected（RFC 3550 §A.3）
+    /// 若完全未收到封包但已送出封包，回傳 1.0（100% loss）
     pub fn packet_loss_rate(&self) -> f64 {
+        let sent     = self.sent_packets.load(Ordering::Relaxed);
         let recv     = self.recv_packets.load(Ordering::Relaxed);
         let first    = *self.first_seq.lock().unwrap();
         let max      = *self.max_seq.lock().unwrap();
@@ -118,12 +120,12 @@ impl RtpStats {
 
         match (first, max) {
             (Some(f), Some(m)) => {
-                // expected = cycles * 65536 + (max - first + 1)
                 let span: u64 = cycles * 65536 + m.wrapping_sub(f) as u64 + 1;
                 if span == 0 { return 0.0; }
                 let lost = span.saturating_sub(recv);
                 lost as f64 / span as f64
             }
+            _ if sent > 0 => 1.0,
             _ => 0.0,
         }
     }
@@ -136,15 +138,23 @@ impl RtpStats {
         let max       = *self.max_seq.lock().unwrap();
         let cycles    = self.seq_cycles.load(Ordering::Relaxed);
 
-        let (expected, lost) = match (first, max) {
-            (Some(f), Some(m)) => {
-                let span = cycles * 65536 + m.wrapping_sub(f) as u64 + 1;
-                (span, span.saturating_sub(recv))
-            }
-            _ => (0, 0),
+        // 用接收端 seq 空間計算 expected（RFC 3550 §A.3）
+        let seq_expected = match (first, max) {
+            (Some(f), Some(m)) => cycles * 65536 + m.wrapping_sub(f) as u64 + 1,
+            _ => 0,
         };
 
-        let loss_rate = if expected == 0 { 0.0 } else { lost as f64 / expected as f64 };
+        // 當完全沒收到 RTP 時（seq_expected == 0），改用 sent 做基準：
+        // 雙向通話應收到與送出同數量級的封包，收到 0 = 100% loss
+        let (_expected, lost, loss_rate) = if seq_expected > 0 {
+            let lost = seq_expected.saturating_sub(recv);
+            (seq_expected, lost, lost as f64 / seq_expected as f64)
+        } else if sent > 0 {
+            (sent, sent, 1.0)
+        } else {
+            (0, 0, 0.0)
+        };
+
         let jitter_ms = self.jitter_ms();
         let mos       = estimate_mos(loss_rate, jitter_ms);
 

@@ -506,7 +506,7 @@ enum SipEvent {
 
 主控迴圈用 `match ev { ... }` 分派：
 - `Response` 走原本的狀態機（100/180/200/4xx-6xx）
-- `IncomingRequest` 對 `INVITE` 回 `200 OK + SDP`（保活）；對 `BYE` 回 `200 OK` 並把 dialog 標記為 Completed
+- `IncomingRequest` 對 `INVITE` 回 `200 OK + SDP`（保活）並解析 SDP 中新的 RTP 地址、呼叫 `RtpSession::update_remote()` 切換送出目標；對 `BYE` 回 `200 OK` 並把 dialog 標記為 Completed
 
 **為什麼一定要回 RE-INVITE？** 軟交換機常用 SIP Session-Expires (RFC 4028) 機制定期送 RE-INVITE 確認對方還活著。過去版本的 sipress 完全忽略這些請求，導致 ~9 秒後伺服器砍掉通話 → 接通通話被縮短，錄音檔只有開頭。
 
@@ -576,7 +576,7 @@ if now >= deadline || all_done {
 |---------|------|
 | `now >= deadline` | 時間到（duration > 0） |
 | `total_limit_reached && calls_active <= 0` | 達通數上限且沒有進行中的通話 |
-| stop channel 收到訊號（GUI Stop）| `tokio::select!` 中斷 engine |
+| `stopped`（`watch::Receiver` 收到訊號）| GUI Stop → `stop_handle().send(true)` → 引擎停止新通話、對所有進行中通話發 BYE/CANCEL、等待 drain 後正常產生 FinalReport |
 
 ### ACK 與 BYE 的 Request-URI（RFC 3261 合規）
 
@@ -770,6 +770,19 @@ pub fn stop(&self) -> RtpStatsSnapshot {
 
 `stop()` 是同步函數（不 await），設置 flag 後立即回傳快照。兩個 task 會在下次迴圈迭代時檢測到 flag 並退出。
 
+### RE-INVITE RTP 目標更新
+
+`RtpSession` 持有 `socket: Arc<UdpSocket>` 引用，提供 `update_remote(new_addr)` 方法：
+
+```rust
+pub async fn update_remote(&self, new_addr: &str) -> Result<()> {
+    self.socket.connect(new_addr).await?;
+    Ok(())
+}
+```
+
+當 Engine 收到 RE-INVITE 且 SDP 中的 RTP 地址與原先不同時，呼叫此方法對 connected UDP socket 重新 `connect()`，後續 `send()` 即自動送往新地址。這解決了交換機 RE-INVITE 換 port 後音訊仍送到舊 port 的問題。
+
 ---
 
 ## 12. core — RTP 品質統計 rtp/stats.rs
@@ -836,6 +849,37 @@ if seq < prev_max && diff < 0x8000 {
 **為什麼不用傳送計數？**
 - 接收端看不到傳送端的計數器狀態
 - 傳送端計數器只在同一個程序內可用，無法反映真實網路掉包
+
+### 零收包的 Fallback（sent-based loss）
+
+當完全沒有收到對端 RTP（`first_seq = None`），RFC 3550 的序號空間計算無法使用。但如果本端已成功送出封包（`sent > 0`），代表通話已建立卻收不到回程音訊 → 100% loss：
+
+```rust
+let (_expected, lost, loss_rate) = if seq_expected > 0 {
+    // 正常：用接收端 seq 空間（RFC 3550 §A.3）
+    let lost = seq_expected.saturating_sub(recv);
+    (seq_expected, lost, lost as f64 / seq_expected as f64)
+} else if sent > 0 {
+    // 有送無收 → 100% loss
+    (sent, sent, 1.0)
+} else {
+    // RTP 未啟動
+    (0, 0, 0.0)
+};
+```
+
+**修正前的問題**：零收包 → `expected = 0` → `loss = 0%` → `MOS ≈ 4.4（優良）`，完全誤導。修正後 loss = 100% → MOS ≈ 1.0（劣）。
+
+### on_send 計數時機
+
+`on_send()` 僅在 `socket.send()` 成功後呼叫，避免送失敗的封包被計為已送出：
+
+```rust
+match socket.send(&bytes).await {
+    Ok(_)  => stats.on_send(frame.len()),
+    Err(e) => { break; }
+}
+```
 
 ### MOS 估算（ITU-T E-Model 簡化版）
 
@@ -1097,14 +1141,19 @@ fn pick_dummy_rtp_port(_local_ip: &str) -> u16 {
 ### Stop 訊號與優雅退出
 
 ```rust
-let stop_flag = Arc::new(tokio::sync::Notify::new());
-// 主任務：時間到後通知
-stop_flag.notify_waiters();
+// AgentEngine 持有 watch::Sender<bool>
+let (stop_tx, _) = watch::channel(false);
+
+// 外部呼叫 stop_handle().send(true) 觸發停止
+// 或時間到時 engine 內部自行 send(true)
+let _ = self.stop_tx.send(true);
 time::sleep(1 秒).await;
 for h in handles { h.abort(); }
 ```
 
-`Notify::notify_waiters()` 一次喚醒所有正在 `notified().await` 的 task。每個 runner 收到通知後會送 REGISTER Expires=0，再從主迴圈 break。1 秒等待是給網路 round-trip 的緩衝。
+改用 `watch::channel` 取代先前的 `Notify`，原因是 `Notify::notify_waiters()` 只會喚醒**已經在 await 的 task**，如果 runner 剛好在處理其他事情（例如正在收 SIP 訊息），通知會被丟失。`watch` 儲存最新值，`changed().await` 不會錯過已發生的狀態變更。
+
+`stop_handle()` 回傳 `watch::Sender<bool>` clone，讓 GUI 的 `stop_test` command 可以從外部觸發 graceful stop（REGISTER Expires=0）。
 
 ### 為何用單 socket？
 
@@ -1210,18 +1259,30 @@ pub async fn start_test(
     tokio::spawn(async move {
         let result = match mode {
             Mode::Caller => {
-                let engine = Engine::new(config);
-                tokio::select! {
-                    r = engine.run(Some(on_progress)) => r,
-                    _ = stop_rx.recv() => return,
-                }
+                let engine      = Engine::new(config);
+                let stop_handle = engine.stop_handle();
+                // 將前端的 stop 訊號轉發成 watch::Sender(true)
+                // 讓 Engine 走完 graceful stop（BYE/CANCEL + drain）
+                let forward = tokio::spawn(async move {
+                    if stop_rx.recv().await.is_some() {
+                        let _ = stop_handle.send(true);
+                    }
+                });
+                let r = engine.run(Some(on_progress)).await;
+                forward.abort();
+                r
             }
             Mode::Agent => {
-                let engine = AgentEngine::new(config);
-                tokio::select! {
-                    r = engine.run(Some(on_progress)) => r,
-                    _ = stop_rx.recv() => return,
-                }
+                let engine      = AgentEngine::new(config);
+                let stop_handle = engine.stop_handle();
+                let forward = tokio::spawn(async move {
+                    if stop_rx.recv().await.is_some() {
+                        let _ = stop_handle.send(true);
+                    }
+                });
+                let r = engine.run(Some(on_progress)).await;
+                forward.abort();
+                r
             }
         };
         match result {
@@ -1235,6 +1296,12 @@ pub async fn start_test(
 ```
 
 `start_test` 立即回傳 `"started"`，引擎在背景 task 中執行。前端收到回傳後開始輪詢 `get_snapshot`。
+
+**Graceful Stop 機制**：不再用 `tokio::select!` 直接中斷引擎。改為將前端 `stop_rx` 透過一個 `forward` task 轉發成 `stop_handle().send(true)`，引擎收到後：
+- **Caller 模式**：停止發起新通話 → 對所有 `Connected` 通話發 BYE、`Calling/Trying/Ringing` 通話發 CANCEL → 等待 BYE 回應 → 正常回傳 `FinalReport`
+- **Agent 模式**：通知所有 runner 發 `REGISTER Expires=0` → 等待 deregister → 正常回傳 `FinalReport`
+
+這確保交換機端在 Stop 後立即釋放通道，不需等 session timer 超時。
 
 ### register_account Command
 
@@ -1651,6 +1718,9 @@ Phase 3 計畫補上：每個 dialog 啟動 `RtpSession`，可選擇回送靜音
 | 接通的通話幾秒被砍 | 過去版本忽略 RE-INVITE 導致伺服器砍 dialog | 已修補；查 SIP log 確認有 `回應 200 OK` 的 RE-INVITE 紀錄 |
 | 民眾模式錄音檔只有開頭 | 同上（Session-Expires 沒回應）| 已修補；如還發生請貼 SIP log 上來 |
 | 座席模式按開始跑成民眾模式 | Config 沒帶 `mode` 欄位 | 已修補；確認 `buildRustConfig()` 有 `mode: c.mode` |
+| RE-INVITE 後 RTP 送到舊 port | Engine 收到 RE-INVITE 時只回 200 OK，沒更新 RTP 目標 | 已修補；RE-INVITE handler 現在解析 SDP 並呼叫 `RtpSession::update_remote()` |
+| 按 Stop 後交換機不馬上掛線 | Caller 模式按 Stop 直接 drop Engine，沒發 BYE/CANCEL | 已修補；改用 `stop_handle()` graceful stop，會對所有通話發 BYE/CANCEL |
+| RTP 完全沒收到但 MOS 顯示優良 | 零收包時 `expected=0` → `loss=0%` → `MOS≈4.4` | 已修補；有送無收時以 sent 為基準回報 100% loss |
 
 ---
 

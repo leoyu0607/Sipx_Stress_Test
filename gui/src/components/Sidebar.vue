@@ -140,7 +140,7 @@ function statusLabel(s: string) {
       <div class="section-body" v-show="sec.profile">
 
         <div class="field">
-          <label>交換機接入號（主叫）</label>
+          <label>主叫號碼</label>
           <input v-model="store.config.caller.accessNumber" type="text" placeholder="例：4008001234">
           <div class="field-hint">From 標頭中的號碼，告訴交換機「這通是誰打的」</div>
         </div>
