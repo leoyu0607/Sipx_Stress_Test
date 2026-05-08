@@ -10,8 +10,8 @@ impl RegisterMessage {
     #[allow(clippy::too_many_arguments)]
     pub fn build(
         username:    &str,
-        domain:      &str,           // SIP From/To URI 中的 domain
-        server:      &str,           // 伺服器 ip:port (Request-URI)
+        _domain:     &str,           // 已不使用，From/To 改用 server（含 port）
+        server:      &str,           // 伺服器 ip:port (Request-URI + From/To domain)
         local_addr:  &str,           // 本機綁定 ip:port
         cseq:        u32,
         branch:      &str,
@@ -27,26 +27,25 @@ impl RegisterMessage {
 
         format!(
             "REGISTER sip:{server} SIP/2.0\r\n\
-             Via: SIP/2.0/{tp} {local};branch={branch};rport\r\n\
-             Max-Forwards: 70\r\n\
-             From: <sip:{user}@{domain}>;tag={tag}\r\n\
-             To: <sip:{user}@{domain}>\r\n\
+             Via: SIP/2.0/{tp} {local};rport;branch={branch}\r\n\
+             From: <sip:{user}@{server}>;tag={tag}\r\n\
+             To: <sip:{user}@{server}>\r\n\
              Call-ID: {call_id}\r\n\
              CSeq: {cseq} REGISTER\r\n\
-             Contact: <sip:{user}@{local};transport={tplow}>;expires={expires}\r\n\
+             Contact: <sip:{user}@{local}>\r\n\
+             Max-Forwards: 70\r\n\
              Expires: {expires}\r\n\
              {auth_line}\
              User-Agent: sipress/0.1\r\n\
-             Allow: INVITE,ACK,BYE,CANCEL,OPTIONS,REGISTER\r\n\
+             Allow: INVITE, INFO, PRACK, ACK, BYE, CANCEL, OPTIONS, NOTIFY, REGISTER, SUBSCRIBE, REFER, PUBLISH, UPDATE, MESSAGE\r\n\
+             Allow-Events: talk,hold,conference,refer,check-sync\r\n\
              Content-Length: 0\r\n\
              \r\n",
             server    = server,
             tp        = transport,
-            tplow     = transport.to_lowercase(),
             local     = local_addr,
             branch    = branch,
             user      = username,
-            domain    = domain,
             tag       = from_tag,
             call_id   = call_id,
             cseq      = cseq,

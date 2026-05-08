@@ -307,7 +307,7 @@ async fn account_runner(
         challenge: None,
     }));
 
-    let initial_expires = 600u32;
+    let initial_expires = 240u32;
     let mut current_expires = initial_expires;
     let server_addr_str = cfg.server_addr.clone();
     let transport_str = match cfg.transport {
@@ -369,11 +369,19 @@ async fn account_runner(
                         Arc::clone(&reg_state),
                     ).await;
                 } else {
-                    handle_request(
+                    let needs_reregister = handle_request(
                         &raw, &sock, &log, &local_addr, &local_ip,
                         &account, &cfg, &live, &detail, Arc::clone(&dialogs),
                         &port_counter, &rtp_sessions,
                     ).await;
+                    if needs_reregister {
+                        trigger_re_register(
+                            &sock, &log, &server_addr_str, &domain, &local_addr,
+                            &account, &reg_from_tag, &reg_call_id, transport_str,
+                            current_expires, Arc::clone(&reg_state),
+                        ).await;
+                        last_register_at = Instant::now();
+                    }
                 }
             }
 
@@ -621,7 +629,7 @@ async fn handle_request(
     dialogs:      Arc<Mutex<HashMap<String, DialogCtx>>>,
     port_counter: &Arc<Mutex<u16>>,
     rtp_sessions: &Arc<Mutex<Vec<Arc<crate::rtp::stats::RtpStats>>>>,
-) {
+) -> bool {
     let method = raw.lines().next()
         .and_then(|l| l.split_whitespace().next())
         .map(|s| s.to_uppercase())
@@ -634,7 +642,7 @@ async fn handle_request(
         })
         .and_then(|l| l.splitn(2, ':').nth(1))
         .map(|s| s.trim().to_string())
-    { Some(c) => c, None => return };
+    { Some(c) => c, None => return false };
 
     match method.as_str() {
         "INVITE" => {
@@ -778,7 +786,8 @@ async fn handle_request(
                 }
                 detail.record_duration(ctx.answered_at.elapsed().as_secs_f64());
                 live.on_completed();
-                log.log_event(&account.extension, &format!("[{}] 通話結束", short(&call_id)));
+                log.log_event(&account.extension, &format!("[{}] 通話結束 → re-REGISTER", short(&call_id)));
+                return true;
             }
         }
         "CANCEL" => {
@@ -806,6 +815,7 @@ async fn handle_request(
             log.log_event(&account.extension, &format!("忽略未知請求: {}", method));
         }
     }
+    false
 }
 
 // ─── 共用：建構回應訊息 ─────────────────────────────────────────────
