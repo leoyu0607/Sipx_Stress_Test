@@ -153,10 +153,24 @@ pub struct StatsSnapshot {
     pub calls_concurrent: u64,   // = calls_active.max(0)
     pub asr:              f64,   // calls_answered / calls_initiated × 100
     pub error_rate:       f64,   // (calls_failed + calls_timeout) / calls_initiated × 100
+
+    // ── 即時 RTP 品質（Engine 進度 task 每秒聚合所有活躍 RtpSession） ──
+    pub rtp_mos:           Option<f64>,   // 平均 MOS（None = 尚無 RTP session）
+    pub rtp_loss_pct:      Option<f64>,   // 平均掉包率 %
+    pub rtp_jitter_ms:     Option<f64>,   // 平均 Jitter ms
+    pub rtp_sent_packets:  Option<u64>,   // 累計送出封包數
+    pub rtp_recv_packets:  Option<u64>,   // 累計收到封包數
+
+    // ── 引擎完成旗標 ──
+    pub finished: bool,   // Engine/AgentEngine 主迴圈結束後設為 true
 }
 ```
 
 `QUEUED`（佇列中）在前端計算：`calls_initiated - calls_answered - calls_failed - calls_timeout`，等價於「已發出但未接通也未失敗的 INVITE 數量」，近似於 `calls_active`。
+
+**即時 RTP 欄位**：Engine 的進度 task 每秒遍歷 `rtp_sessions: HashMap<call_id, RtpSession>`，對所有活躍 session 呼叫 `stats.snapshot()` 聚合平均 MOS / loss / jitter 與累計封包數，填入 `StatsSnapshot`。前端 `applySnapshot()` 讀取這些欄位後即時更新 RightPanel 的 MOS / 掉包 / Jitter 長條圖。
+
+**`finished` 旗標**：解決 `duration=0 + max_total_calls` 場景下前端不知道引擎已結束的問題。Engine/AgentEngine 在主迴圈結束後、回傳 `FinalReport` 前，透過 `engine_finished: Arc<AtomicBool>` 設為 true，進度 task 將此值帶入 snapshot。前端 `pollTimer` 每秒檢查 `snap.finished`，為 true 時呼叫 `_finishTest()` 取回報告。
 
 ### DetailedStats（直方圖，需 Mutex）
 
@@ -870,6 +884,48 @@ let (_expected, lost, loss_rate) = if seq_expected > 0 {
 
 **修正前的問題**：零收包 → `expected = 0` → `loss = 0%` → `MOS ≈ 4.4（優良）`，完全誤導。修正後 loss = 100% → MOS ≈ 1.0（劣）。
 
+### SSRC 變更追蹤（RE-INVITE 場景）
+
+RE-INVITE 後對端可能更換媒體伺服器，導致 RTP 的 SSRC（Synchronization Source）改變。新 SSRC 的序號從全新的起點開始，與舊 SSRC 的序號空間不連續。
+
+**修正前的問題**：舊 SSRC 最後序號 36232，新 SSRC 起始序號 61771 → `expected = 61771 - 35983 + 1 = 25789`，但實際只收到 ~614 包 → 掉包率 93.72%、MOS 1.08。完全是假象。
+
+**解法**：在 `RtpStats` 新增三個欄位追蹤跨 SSRC 的累積統計：
+
+```rust
+pub struct RtpStats {
+    current_ssrc:   Mutex<Option<u32>>,  // 目前的 SSRC
+    prior_expected: AtomicU64,           // 前一個（或多個）SSRC 期間的 expected 累計
+    prior_received: AtomicU64,           // 前一個（或多個）SSRC 期間的 received 累計
+    ...
+}
+```
+
+`on_recv()` 接收 SSRC 參數，偵測到 SSRC 變更時：
+
+```rust
+// 1. 累積舊 SSRC 期間的統計
+prior_expected += (max_seq - first_seq + 1) + cycles × 65536
+prior_received += received
+
+// 2. 重設序號追蹤
+first_seq = new_seq
+max_seq   = new_seq
+seq_cycles = 0
+received   = 1   （本包）
+current_ssrc = new_ssrc
+```
+
+`snapshot()` 和 `packet_loss_rate()` 合併所有 SSRC 期間：
+
+```rust
+total_expected = prior_expected + current_ssrc_expected
+total_received = prior_received + current_ssrc_received
+loss_rate      = (total_expected - total_received) / total_expected
+```
+
+這樣無論 RE-INVITE 換了幾次 SSRC，每個 SSRC 期間都獨立計算後加總，不會因為序號空間跳躍而產生假掉包。
+
 ### on_send 計數時機
 
 `on_send()` 僅在 `socket.send()` 成功後呼叫，避免送失敗的封包被計為已送出：
@@ -1061,6 +1117,9 @@ async fn recv_with_timeout(sock, dur) -> Result<String> {
 ```
 AgentEngine::run()
    │
+   ├── 建立共享 rtp_port_counter + rtp_sessions 列表
+   ├── 啟動進度回報 task（聚合即時 RTP 品質）
+   │
    ├── 為每個 account spawn task：account_runner()
    │         │
    │         ├── 開 UdpSocket + connect(server)
@@ -1069,12 +1128,13 @@ AgentEngine::run()
    │         └── tokio::select! 主迴圈：
    │               ├── sock.recv() ─→ handle_response() / handle_request()
    │               ├── re-register 計時器 ─→ 沿用快取 challenge 重送 REGISTER
-   │               └── stop.notified() ─→ REGISTER Expires=0 → break
+   │               ├── 通話 timeout ─→ ACK(10s)/BYE(150s) 未收到 → 主動 BYE
+   │               └── stop.changed() ─→ REGISTER Expires=0 → break
    │
-   ├── time::sleep(duration)
-   ├── stop_flag.notify_waiters()  // 通知所有 runner 解除註冊
-   ├── time::sleep(1 秒)            // 給 deregister 一些時間
-   └── 全部 abort + 產生 FinalReport
+   ├── time::sleep(duration) 或 stop.changed()
+   ├── stop_tx.send(true)     // 通知所有 runner 解除註冊
+   ├── time::sleep(2 秒)      // 給 deregister + RTP 停止一些時間
+   └── 全部 abort + 收集 RTP 統計 + 產生 FinalReport
 ```
 
 ### RegState（per-account）
@@ -1105,10 +1165,10 @@ match cseq_method {
 
 | 方法 | 處理 |
 |------|------|
-| `INVITE`（新通話） | `live.on_invite()` → 100 Trying → 200 OK + SDP（PCMA）→ 在 dialogs 表中記錄 |
-| `INVITE`（已有 dialog） | RE-INVITE，視為保活，回 200 OK + SDP |
-| `ACK` | 不需回應 |
-| `BYE` | 200 OK + `live.on_completed()` + 從 dialogs 表移除 |
+| `INVITE`（新通話） | `live.on_invite()` → 100 Trying → 180 Ringing → 分配 RTP port → 200 OK + SDP → 啟動 `RtpSession`（若 enable_rtp）→ 在 dialogs 表中記錄 |
+| `INVITE`（已有 dialog） | RE-INVITE，回 200 OK + SDP；解析 SDP 更新 RTP 目標（`update_remote()`） |
+| `ACK` | 標記 `ack_received = true`（10s 未收到 → 主動 BYE） |
+| `BYE` | 200 OK + 停止 RTP + `live.on_completed()` + 從 dialogs 表移除 |
 | `CANCEL` | 200 OK（CANCEL）+ 487 Request Terminated（INVITE）+ `live.on_failed()` |
 | `OPTIONS` | 200 OK（健康檢查）|
 
@@ -1128,15 +1188,52 @@ fn build_response_with_sdp(raw_request, status_line, to_tag, local_addr, rtp_por
 
 `inject_to_tag_if_missing` 處理一個 corner case：若伺服器送來的 INVITE 中 To 標頭沒有 tag（這是合法的，初次 INVITE 時 callee 還沒被指派 tag），我們得補上自己生成的 to_tag。
 
-### 目前的限制：RTP port 是假的
+### 真實 RTP 收發
+
+當 `enable_rtp = true` 時，座席模式使用與民眾模式相同的 `RtpSession` 基礎設施：
 
 ```rust
-fn pick_dummy_rtp_port(_local_ip: &str) -> u16 {
-    rand::thread_rng().gen_range(16000..32000) | 1 → 偶數化
-}
+// 接聽 INVITE 時分配真實 RTP port
+let (rtp_port, pre_bound) = RtpSession::allocate_port(&port_counter, local_ip).await?;
+// 200 OK SDP 中宣告真實 port
+let ok = build_response_with_sdp(raw, "200 OK", &to_tag, local_addr, rtp_port);
+// 解析 INVITE SDP 中對端 RTP 地址
+let remote_rtp_addr = SipResponse::sdp_rtp_addr(raw, sip_ip);
+// 啟動 RTP session
+let session = RtpSession::start(rtp_cfg, port_counter, pre_bound).await?;
+rtp_sessions.lock().await.push(Arc::clone(&session.stats)); // 加入即時聚合列表
 ```
 
-只是隨機數字，沒有真的 bind。對方送來的 RTP 會 ICMP unreachable。SIP 信令本身可正常完成。Phase 3 會補上真實的 RTP socket 與音訊回送。
+`rtp_sessions: Vec<Arc<RtpStats>>` 被進度 task 每秒遍歷，聚合所有活躍 session 的平均 MOS / loss / jitter，填入 `StatsSnapshot` 供前端即時顯示。
+
+當 `enable_rtp = false` 時，退回到 `pick_dummy_rtp_port()` 隨機數字模式（純 SIP 信令測試）。
+
+### ACK / BYE timeout 主動掛斷
+
+```rust
+// DialogCtx 追蹤 ACK 狀態
+struct DialogCtx {
+    ack_received: bool,   // 收到 ACK 後設為 true
+    answered_at:  Instant, // 200 OK 送出時間
+    rtp_session:  Option<RtpSession>,
+    // ...
+}
+
+// tokio::select! 主迴圈中的 timeout branch：
+// - !ack_received && elapsed > 10s → ACK timeout，主動 BYE
+// - ack_received && elapsed > 150s → BYE timeout，主動 BYE
+```
+
+timeout 後座席建構 BYE（From/To 交換，因座席是 UAS）並送出，停止 RTP，記錄 calls_completed，再自動 re-REGISTER 維持在線。
+
+### 通話結束後 re-REGISTER
+
+```rust
+async fn trigger_re_register(...) {
+    // 沿用快取的 Digest challenge，立即重送 REGISTER
+    // 確保交換機不因 REGISTER 過期而不再分配來電給此座席
+}
+```
 
 ### Stop 訊號與優雅退出
 
@@ -1467,14 +1564,29 @@ async function startPolling() {
 ```typescript
 clockTimer = setInterval(() => {
     elapsedSec.value++;
-    // duration=0 時不自動停止，等 Rust 引擎回報完成
+    // duration>0 時依計時器自動停止
     if (config.value.duration > 0 && elapsedSec.value >= config.value.duration) {
         _finishTest();
     }
 }, 1000);
+
+// pollTimer 每秒輪詢 snapshot，檢查引擎完成旗標
+pollTimer = setInterval(async () => {
+    const snap = await invoke<RustSnapshot>('get_snapshot');
+    if (snap) {
+        applySnapshot(snap);
+        if (snap.finished) { _finishTest(); }  // ← 引擎回報完成
+    }
+}, 1000);
 ```
 
-當 `duration = 0` 時，前端時鐘持續計時但不觸發 `_finishTest()`。測試結束訊號由 `get_snapshot` 輪詢到 `null`（引擎結束後不再更新 snapshot）來判斷，或使用者點擊 Stop 按鈕。
+**自動停止機制**（雙重保障）：
+1. **`duration > 0`**：前端 `clockTimer` 計時到達後呼叫 `_finishTest()`
+2. **`snap.finished`**：後端引擎主迴圈結束後設 `finished = true`，前端 `pollTimer` 每秒檢查
+
+這解決了 `duration=0 + max_total_calls` 的場景：引擎達到總通數上限後自動結束，透過 `finished` 旗標通知前端，不再依賴計時器。使用者點擊 Stop 按鈕仍可隨時手動停止。
+
+**即時 RTP 品質更新**：`applySnapshot()` 除了更新 SIP 指標外，也讀取 `snap.rtp_mos` 等欄位即時更新 `rtpMetrics`，讓 RightPanel 的 MOS / 掉包率 / Jitter 長條圖在測試期間即時刷新（不再只在測試結束後顯示）。
 
 ### HTML 報告匯出（exportHtml）
 
@@ -1543,22 +1655,6 @@ App.vue
 ```
 
 `v-model.number` 確保雙向綁定為數字型別（不是字串），max=300 限制最大值。
-
-**新增：座席端 Coming Soon 橫幅**
-
-座席端（Agent）tab 目前尚未實作，在 section-body 頂部顯示提示橫幅：
-
-```html
-<div class="coming-soon-banner">
-  <span class="cs-icon">🚧</span>
-  <div>
-    <div class="cs-title">尚未實作</div>
-    <div class="cs-sub">座席端模式仍在開發中，目前僅支援民眾端（主動撥出）</div>
-  </div>
-</div>
-```
-
-`.coming-soon-banner` 使用半透明黃色背景（`rgba(255, 180, 0, 0.07)`）加 25% 黃色邊框，視覺上明顯但不干擾佈局。
 
 ### ChartPanel.vue — 折線圖
 
@@ -1690,15 +1786,14 @@ RTP 每個 Session 有兩個 tokio task stack（預設 2MB 每 task），但 tok
 - **dialog 清晰度**：每帳號獨立 socket = 每帳號獨立的 SIP UA，內部狀態彼此完全隔離，debug 容易。
 - **代價**：N 個帳號 = N 個 fd。Linux 預設 1024 fd，1000 個座席仍在範圍內；超過時可 `ulimit -n` 提升。
 
-### J. AgentEngine 為何不真實處理 RTP？
+### J. 座席模式的 RTP 實作
 
-Phase 2 暫時略過 RTP 收/送，原因：
+座席模式現已支援真實 RTP 收發，與民眾模式共用 `RtpSession` 基礎設施。主要差異：
 
-1. SIP 信令層的負載比 RTP 重得多（每通通話只有幾 KB SIP 訊息，但每秒有 50 個 RTP 封包）
-2. 座席壓測的核心問題是「同時可註冊多少座席」「來電分配（ACD）的延遲」，這些都在 SIP 層解決
-3. 真實 RTP 需要為每個進行中的通話 bind 一個 UDP port，與民眾模式的 `RtpSession::allocate_port()` 邏輯類似但又不完全相同（座席是 UAS，port 寫在 200 OK 而非 INVITE）
-
-Phase 3 計畫補上：每個 dialog 啟動 `RtpSession`，可選擇回送靜音 / 預錄音檔，並收集 MOS 等品質指標。
+1. **port 分配時機不同**：民眾模式在 INVITE 前預分配（寫入 SDP offer），座席模式在收到 INVITE 後分配（寫入 200 OK SDP answer）
+2. **遠端地址來源**：民眾模式從 200 OK SDP 解析，座席模式從 INVITE SDP 解析
+3. **共用 `rtp_port_counter`**：所有 runner 共用同一個 port 計數器，避免 port 衝突
+4. 當 `enable_rtp = false` 時，退回到 `pick_dummy_rtp_port()` 隨機數字模式（純 SIP 信令壓測，不佔 port 資源）
 
 ---
 
@@ -1721,6 +1816,7 @@ Phase 3 計畫補上：每個 dialog 啟動 `RtpSession`，可選擇回送靜音
 | RE-INVITE 後 RTP 送到舊 port | Engine 收到 RE-INVITE 時只回 200 OK，沒更新 RTP 目標 | 已修補；RE-INVITE handler 現在解析 SDP 並呼叫 `RtpSession::update_remote()` |
 | 按 Stop 後交換機不馬上掛線 | Caller 模式按 Stop 直接 drop Engine，沒發 BYE/CANCEL | 已修補；改用 `stop_handle()` graceful stop，會對所有通話發 BYE/CANCEL |
 | RTP 完全沒收到但 MOS 顯示優良 | 零收包時 `expected=0` → `loss=0%` → `MOS≈4.4` | 已修補；有送無收時以 sent 為基準回報 100% loss |
+| RE-INVITE 後 RTP 掉包率異常高（>90%） | RE-INVITE 換了媒體伺服器，SSRC 改變導致序號空間不連續，被誤判為大量掉包 | 已修補；`RtpStats` 追蹤 SSRC 變更，每個 SSRC 期間獨立統計後合併 |
 
 ---
 

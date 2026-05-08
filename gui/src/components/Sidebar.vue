@@ -230,15 +230,6 @@ function statusLabel(s: string) {
       </div>
       <div class="section-body agent-body" v-show="sec.profile">
 
-        <!-- Coming Soon notice -->
-        <div class="coming-soon-banner">
-          <span class="cs-icon">🚧</span>
-          <div>
-            <div class="cs-title">尚未實作</div>
-            <div class="cs-sub">座席端模式仍在開發中，目前僅支援民眾端（主動撥出）</div>
-          </div>
-        </div>
-
         <!-- Default domain -->
         <div class="field">
           <label>預設 SIP Domain</label>
@@ -761,31 +752,6 @@ function statusLabel(s: string) {
 
 .agent-section { flex: 1; display: flex; flex-direction: column; }
 .agent-body { flex: 1; overflow-y: auto; }
-
-/* Coming-soon banner */
-.coming-soon-banner {
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
-  background: rgba(255, 180, 0, 0.07);
-  border: 1px solid rgba(255, 180, 0, 0.25);
-  border-radius: var(--radius-sm);
-  padding: 8px 10px;
-  margin-bottom: 10px;
-}
-.cs-icon { font-size: 16px; line-height: 1; flex-shrink: 0; margin-top: 1px; }
-.cs-title {
-  font-size: 11px;
-  font-weight: 600;
-  color: rgb(255, 190, 50);
-  margin-bottom: 2px;
-}
-.cs-sub {
-  font-family: var(--mono);
-  font-size: 10px;
-  color: var(--text2);
-  line-height: 1.5;
-}
 
 /* CLI */
 .cli-section {

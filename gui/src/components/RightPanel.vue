@@ -114,7 +114,7 @@ const jitterColor = computed(() => {
         <span v-else-if="!rtpConfigured" class="rtp-off">未啟用</span>
       </div>
 
-      <!-- 測試完成後顯示 MOS 等統計 -->
+      <!-- 即時 + 測試完成後顯示 MOS 等統計 -->
       <template v-if="rtp.enabled">
         <!-- MOS -->
         <div class="rtp-row">
@@ -175,10 +175,14 @@ const jitterColor = computed(() => {
         </div>
       </template>
 
-      <!-- 測試執行中：已設定 RTP 但還沒有結果 -->
+      <!-- 測試執行中：已設定 RTP 但尚未有 session 建立 -->
+      <div v-else-if="rtpConfigured && store.status === 'running'" class="rtp-hint">
+        G.711A (PCMA) ← 等待通話建立…
+      </div>
+
+      <!-- 測試執行中：已設定 RTP 但還未開始 -->
       <div v-else-if="rtpConfigured" class="rtp-hint">
-        G.711A (PCMA) ← 傳送中<br>
-        <span style="color:var(--text2);font-size:11px;">結果於測試結束後顯示</span>
+        G.711A (PCMA) 就緒
       </div>
 
       <!-- RTP 未啟用提示 -->

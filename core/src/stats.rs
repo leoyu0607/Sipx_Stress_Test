@@ -82,6 +82,12 @@ impl LiveStats {
             rtp_sessions:     rtp,
             asr,
             error_rate,
+            rtp_mos:          None,
+            rtp_loss_pct:     None,
+            rtp_jitter_ms:    None,
+            rtp_sent_packets: None,
+            rtp_recv_packets: None,
+            finished:         false,
         }
     }
 }
@@ -103,6 +109,14 @@ pub struct StatsSnapshot {
     pub asr: f64,
     /// Error Rate = (failed + timeout) / initiated × 100（%）
     pub error_rate: f64,
+    /// 即時 RTP 品質（從所有活躍 session 聚合；None = RTP 未啟用或無活躍 session）
+    pub rtp_mos:           Option<f64>,
+    pub rtp_loss_pct:      Option<f64>,
+    pub rtp_jitter_ms:     Option<f64>,
+    pub rtp_sent_packets:  Option<u64>,
+    pub rtp_recv_packets:  Option<u64>,
+    /// 引擎是否已結束（用於前端偵測 max_total_calls 完成）
+    pub finished: bool,
 }
 
 // ─── 詳細統計（直方圖，需要 Mutex） ────────────────────────────

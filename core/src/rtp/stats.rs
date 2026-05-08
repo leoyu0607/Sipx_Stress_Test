@@ -35,6 +35,11 @@ pub struct RtpStats {
     pub out_of_order: AtomicU64,
     /// 累計重複封包數
     pub duplicates:   AtomicU64,
+    /// 目前追蹤的 SSRC（RE-INVITE 後對端可能換 SSRC）
+    current_ssrc:     Mutex<Option<u32>>,
+    /// SSRC 切換前累積的 (expected, received) — 避免跨 SSRC 序號空間造成假掉包
+    prior_expected:   AtomicU64,
+    prior_received:   AtomicU64,
 }
 
 impl RtpStats {
@@ -48,9 +53,39 @@ impl RtpStats {
         self.sent_bytes.fetch_add(payload_size as u64, Ordering::Relaxed);
     }
 
-    /// 記錄接收事件（rtp_ts = 封包內時間戳記，recv_us = 系統時間 µs）
-    pub fn on_recv(&self, seq: u16, rtp_ts: u32, recv_us: u64) {
+    /// 記錄接收事件（ssrc = 同步源，seq = 序號，rtp_ts = 封包內時間戳記，recv_us = 系統時間 µs）
+    pub fn on_recv(&self, ssrc: u32, seq: u16, rtp_ts: u32, recv_us: u64) {
         self.recv_packets.fetch_add(1, Ordering::Relaxed);
+
+        // ── SSRC 切換偵測：RE-INVITE 後對端可能換 SSRC ──
+        // 將舊 SSRC 的序號空間統計累積到 prior_expected/prior_received，
+        // 重置 seq 追蹤，避免跨 SSRC 序號空間造成假掉包
+        {
+            let mut cur_ssrc  = self.current_ssrc.lock().unwrap();
+            match *cur_ssrc {
+                None => { *cur_ssrc = Some(ssrc); }
+                Some(prev) if prev != ssrc => {
+                    let first = self.first_seq.lock().unwrap().take();
+                    let max   = self.max_seq.lock().unwrap().take();
+                    if let (Some(f), Some(m)) = (first, max) {
+                        let cycles = self.seq_cycles.load(Ordering::Relaxed);
+                        let expected = cycles * 65536 + m.wrapping_sub(f) as u64 + 1;
+                        let recv_so_far = self.recv_packets.load(Ordering::Relaxed)
+                            - 1  // 不含本次
+                            - self.prior_received.load(Ordering::Relaxed);
+                        self.prior_expected.fetch_add(expected, Ordering::Relaxed);
+                        self.prior_received.fetch_add(recv_so_far, Ordering::Relaxed);
+                    }
+                    self.seq_cycles.store(0, Ordering::Relaxed);
+                    self.jitter_x16_us.store(0, Ordering::Relaxed);
+                    *self.last_rtp_ts.lock().unwrap() = None;
+                    *self.last_recv_us.lock().unwrap() = None;
+                    *self.last_seq.lock().unwrap() = None;
+                    *cur_ssrc = Some(ssrc);
+                }
+                _ => {}
+            }
+        }
 
         // ── Jitter 計算（RFC 3550 §A.8）──
         let mut last_ts  = self.last_rtp_ts.lock().unwrap();
@@ -64,10 +99,8 @@ impl RtpStats {
             if seq_diff == 0 {
                 self.duplicates.fetch_add(1, Ordering::Relaxed);
             } else if seq_diff > 0x7FFF {
-                // 亂序（回退）
                 self.out_of_order.fetch_add(1, Ordering::Relaxed);
             } else {
-                // 正常或略微超前，計算 jitter
                 let recv_diff_8k = ((recv_us.wrapping_sub(prev_us)) as f64
                     / 1_000_000.0 * 8000.0) as i64;
                 let rtp_diff = rtp_ts.wrapping_sub(prev_ts) as i64;
@@ -81,6 +114,9 @@ impl RtpStats {
         *last_ts  = Some(rtp_ts);
         *last_us  = Some(recv_us);
         *last_seq = Some(seq);
+        drop(last_ts);
+        drop(last_us);
+        drop(last_seq);
 
         // ── 序號追蹤（RFC 3550 §A.3 掉包率基礎）──
         let mut first_seq = self.first_seq.lock().unwrap();
@@ -91,9 +127,7 @@ impl RtpStats {
             *max_seq   = Some(seq);
         } else if let Some(prev_max) = *max_seq {
             let diff = seq.wrapping_sub(prev_max);
-            // diff in (0, 0x7FFF] → 序號前進
             if diff > 0 && diff <= 0x7FFF {
-                // 若發生 u16 wrap-around（新 seq < prev_max 且差值 > 1 month）
                 if seq < prev_max && diff < 0x8000 {
                     self.seq_cycles.fetch_add(1, Ordering::Relaxed);
                 }
@@ -110,6 +144,7 @@ impl RtpStats {
 
     /// 掉包率（0.0 ~ 1.0）
     /// 依接收端序號空間計算：(expected - received) / expected（RFC 3550 §A.3）
+    /// 包含 SSRC 切換前累積的統計，避免跨 SSRC 序號空間造成假掉包
     /// 若完全未收到封包但已送出封包，回傳 1.0（100% loss）
     pub fn packet_loss_rate(&self) -> f64 {
         let sent     = self.sent_packets.load(Ordering::Relaxed);
@@ -117,16 +152,25 @@ impl RtpStats {
         let first    = *self.first_seq.lock().unwrap();
         let max      = *self.max_seq.lock().unwrap();
         let cycles   = self.seq_cycles.load(Ordering::Relaxed);
+        let prior_e  = self.prior_expected.load(Ordering::Relaxed);
+        let prior_r  = self.prior_received.load(Ordering::Relaxed);
 
-        match (first, max) {
-            (Some(f), Some(m)) => {
-                let span: u64 = cycles * 65536 + m.wrapping_sub(f) as u64 + 1;
-                if span == 0 { return 0.0; }
-                let lost = span.saturating_sub(recv);
-                lost as f64 / span as f64
-            }
-            _ if sent > 0 => 1.0,
-            _ => 0.0,
+        let cur_expected = match (first, max) {
+            (Some(f), Some(m)) => cycles * 65536 + m.wrapping_sub(f) as u64 + 1,
+            _ => 0,
+        };
+        let cur_recv = recv.saturating_sub(prior_r);
+
+        let total_expected = prior_e + cur_expected;
+        let total_recv     = prior_r + cur_recv;
+
+        if total_expected > 0 {
+            let lost = total_expected.saturating_sub(total_recv);
+            lost as f64 / total_expected as f64
+        } else if sent > 0 {
+            1.0
+        } else {
+            0.0
         }
     }
 
@@ -137,18 +181,23 @@ impl RtpStats {
         let first     = *self.first_seq.lock().unwrap();
         let max       = *self.max_seq.lock().unwrap();
         let cycles    = self.seq_cycles.load(Ordering::Relaxed);
+        let prior_e   = self.prior_expected.load(Ordering::Relaxed);
+        let prior_r   = self.prior_received.load(Ordering::Relaxed);
 
-        // 用接收端 seq 空間計算 expected（RFC 3550 §A.3）
-        let seq_expected = match (first, max) {
+        // 當前 SSRC 的 seq 空間（RFC 3550 §A.3）
+        let cur_expected = match (first, max) {
             (Some(f), Some(m)) => cycles * 65536 + m.wrapping_sub(f) as u64 + 1,
             _ => 0,
         };
+        let cur_recv = recv.saturating_sub(prior_r);
 
-        // 當完全沒收到 RTP 時（seq_expected == 0），改用 sent 做基準：
-        // 雙向通話應收到與送出同數量級的封包，收到 0 = 100% loss
-        let (_expected, lost, loss_rate) = if seq_expected > 0 {
-            let lost = seq_expected.saturating_sub(recv);
-            (seq_expected, lost, lost as f64 / seq_expected as f64)
+        // 合併所有 SSRC 週期的統計
+        let total_expected = prior_e + cur_expected;
+        let total_recv     = prior_r + cur_recv;
+
+        let (_expected, lost, loss_rate) = if total_expected > 0 {
+            let lost = total_expected.saturating_sub(total_recv);
+            (total_expected, lost, lost as f64 / total_expected as f64)
         } else if sent > 0 {
             (sent, sent, 1.0)
         } else {
@@ -252,13 +301,35 @@ mod tests {
     #[test]
     fn test_loss_rate_seq_based() {
         let stats = RtpStats::new();
+        let ssrc = 0x12345678;
         // 模擬收到 seq 100, 101, 103（跳過 102 = 1 個掉包）
         let t = 0u64;
-        stats.on_recv(100, 0, t);
-        stats.on_recv(101, 160, t + 20_000);
-        stats.on_recv(103, 480, t + 60_000);
+        stats.on_recv(ssrc, 100, 0, t);
+        stats.on_recv(ssrc, 101, 160, t + 20_000);
+        stats.on_recv(ssrc, 103, 480, t + 60_000);
         // expected = 103 - 100 + 1 = 4, recv = 3, lost = 1
         let loss = stats.packet_loss_rate();
         assert!((loss - 0.25).abs() < 0.01, "loss={}", loss);
+    }
+
+    #[test]
+    fn test_ssrc_change_no_phantom_loss() {
+        let stats = RtpStats::new();
+        let ssrc_a = 0xAAAAAAAA;
+        let ssrc_b = 0xBBBBBBBB;
+        let t = 0u64;
+        // SSRC A: seq 100..104 (5 packets, 0 loss)
+        for i in 0..5u16 {
+            stats.on_recv(ssrc_a, 100 + i, i as u32 * 160, t + i as u64 * 20_000);
+        }
+        // SSRC B (after RE-INVITE): seq 50000..50004 (5 packets, 0 loss)
+        for i in 0..5u16 {
+            stats.on_recv(ssrc_b, 50000 + i, i as u32 * 160, t + (5 + i) as u64 * 20_000);
+        }
+        let snap = stats.snapshot();
+        // total expected = 5 + 5 = 10, total recv = 10, loss = 0%
+        assert!(snap.loss_rate_pct < 1.0,
+            "SSRC change should not cause phantom loss, got {}%", snap.loss_rate_pct);
+        assert_eq!(snap.recv_packets, 10);
     }
 }

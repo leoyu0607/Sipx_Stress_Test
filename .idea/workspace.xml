@@ -17,8 +17,18 @@
     </cargoProject>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="85702eed-47e3-4cc2-8831-bbca1be3dbbc" name="Changes" comment="Update configuration for SIP stress testing and add .claude to .gitignore">
+    <list default="true" id="85702eed-47e3-4cc2-8831-bbca1be3dbbc" name="Changes" comment="Implement graceful stop mechanism in Engine and AgentEngine with watch::Sender">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/README.md" beforeDir="false" afterPath="$PROJECT_DIR$/README.md" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/core/src/agent_engine.rs" beforeDir="false" afterPath="$PROJECT_DIR$/core/src/agent_engine.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/core/src/engine.rs" beforeDir="false" afterPath="$PROJECT_DIR$/core/src/engine.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/core/src/rtp/session.rs" beforeDir="false" afterPath="$PROJECT_DIR$/core/src/rtp/session.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/core/src/rtp/stats.rs" beforeDir="false" afterPath="$PROJECT_DIR$/core/src/rtp/stats.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/core/src/stats.rs" beforeDir="false" afterPath="$PROJECT_DIR$/core/src/stats.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/gui/src/components/RightPanel.vue" beforeDir="false" afterPath="$PROJECT_DIR$/gui/src/components/RightPanel.vue" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/gui/src/components/Sidebar.vue" beforeDir="false" afterPath="$PROJECT_DIR$/gui/src/components/Sidebar.vue" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/gui/src/stores/testStore.ts" beforeDir="false" afterPath="$PROJECT_DIR$/gui/src/stores/testStore.ts" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/teach.md" beforeDir="false" afterPath="$PROJECT_DIR$/teach.md" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -128,6 +138,7 @@
       <workItem from="1777624094018" duration="8838000" />
       <workItem from="1777865286728" duration="4917000" />
       <workItem from="1777885379381" duration="3870000" />
+      <workItem from="1778226105866" duration="1493000" />
     </task>
     <task id="LOCAL-00001" summary="Add initial project structure and core modules for SIP stress testing">
       <option name="closed" value="true" />
@@ -145,7 +156,15 @@
       <option name="project" value="LOCAL" />
       <updated>1777866774962</updated>
     </task>
-    <option name="localTasksCounter" value="3" />
+    <task id="LOCAL-00003" summary="Implement graceful stop mechanism in Engine and AgentEngine with watch::Sender">
+      <option name="closed" value="true" />
+      <created>1778226402646</created>
+      <option name="number" value="00003" />
+      <option name="presentableId" value="LOCAL-00003" />
+      <option name="project" value="LOCAL" />
+      <updated>1778226402646</updated>
+    </task>
+    <option name="localTasksCounter" value="4" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -165,7 +184,8 @@
   <component name="VcsManagerConfiguration">
     <MESSAGE value="Add initial project structure and core modules for SIP stress testing" />
     <MESSAGE value="Update configuration for SIP stress testing and add .claude to .gitignore" />
-    <option name="LAST_COMMIT_MESSAGE" value="Update configuration for SIP stress testing and add .claude to .gitignore" />
+    <MESSAGE value="Implement graceful stop mechanism in Engine and AgentEngine with watch::Sender" />
+    <option name="LAST_COMMIT_MESSAGE" value="Implement graceful stop mechanism in Engine and AgentEngine with watch::Sender" />
   </component>
   <component name="github-copilot-workspace">
     <instructionFileLocations>

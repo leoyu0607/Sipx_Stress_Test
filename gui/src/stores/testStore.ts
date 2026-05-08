@@ -98,6 +98,14 @@ interface RustSnapshot {
   rtp_sessions:     number   // 目前活躍 RTP session 數（> 0 = 音訊傳送中）
   asr:              number
   error_rate:       number
+  // 即時 RTP 品質（null = RTP 未啟用或無活躍 session）
+  rtp_mos:           number | null
+  rtp_loss_pct:      number | null
+  rtp_jitter_ms:     number | null
+  rtp_sent_packets:  number | null
+  rtp_recv_packets:  number | null
+  // 引擎是否已結束
+  finished:          boolean
 }
 
 // Rust FinalReport shape (subset we use)
@@ -325,6 +333,20 @@ export const useTestStore = defineStore('test', () => {
       rtpLoggedOnce = true
       addLog('ok', `RTP G.711A 音訊傳送中（${snap.rtp_sessions} session${snap.rtp_sessions > 1 ? 's' : ''} active）`)
     }
+
+    // 即時 RTP 品質更新
+    if (snap.rtp_mos !== null && snap.rtp_mos !== undefined) {
+      rtpMetrics.value = {
+        enabled:     true,
+        mos:         snap.rtp_mos,
+        packetLoss:  snap.rtp_loss_pct ?? 0,
+        jitter:      snap.rtp_jitter_ms ?? 0,
+        packetsSent: snap.rtp_sent_packets ?? 0,
+        packetsRecv: snap.rtp_recv_packets ?? 0,
+        outOfOrder:  0,
+      }
+      pushSeries('mos', snap.rtp_mos)
+    }
   }
 
   async function _tryFetchReport() {
@@ -426,13 +448,20 @@ export const useTestStore = defineStore('test', () => {
     pollTimer = setInterval(async () => {
       try {
         const snap = await invoke<RustSnapshot | null>('get_snapshot')
-        if (snap) applySnapshot(snap)
+        if (snap) {
+          applySnapshot(snap)
+          // 引擎已結束（duration 到 / max_total_calls 完成 / graceful stop）
+          if (snap.finished) {
+            _finishTest()
+          }
+        }
       } catch { /* ignore */ }
     }, 1000)
 
     clockTimer = setInterval(() => {
       elapsedSec.value++
       // duration = 0 → unlimited, only stop via max_total_calls or manual stop
+      // finished flag handles all completion cases now
       if (config.value.duration > 0 && elapsedSec.value >= config.value.duration) {
         _finishTest()
       }

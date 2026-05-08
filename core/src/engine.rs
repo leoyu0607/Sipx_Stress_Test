@@ -190,10 +190,13 @@ impl Engine {
             }
         });
 
-        // ── Task 2：進度回報 ──
+        // ── Task 2：進度回報（含即時 RTP 品質） ──
+        let engine_finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
         if let Some(ref cb) = on_progress {
             let cb        = Arc::clone(cb);
             let live      = Arc::clone(&live);
+            let rtp_sess  = Arc::clone(&rtp_sessions);
+            let finished  = Arc::clone(&engine_finished);
             let duration  = cfg.duration_secs as f64;
             let unlimited = cfg.duration_secs == 0;
             tokio::spawn(async move {
@@ -202,8 +205,38 @@ impl Engine {
                     interval.tick().await;
                     let elapsed  = start.elapsed().as_secs_f64();
                     let progress = if unlimited { 0.0 } else { (elapsed / duration).min(1.0) };
-                    cb(live.snapshot(), progress);
+                    let mut snap = live.snapshot();
+
+                    // 聚合所有活躍 RTP session 的即時品質
+                    {
+                        let sessions = rtp_sess.lock().await;
+                        if !sessions.is_empty() {
+                            let mut total_sent: u64 = 0;
+                            let mut total_recv: u64 = 0;
+                            let mut sum_mos    = 0.0_f64;
+                            let mut sum_loss   = 0.0_f64;
+                            let mut sum_jitter = 0.0_f64;
+                            let n = sessions.len() as f64;
+                            for s in sessions.values() {
+                                let rs = s.stats.snapshot();
+                                total_sent += rs.sent_packets;
+                                total_recv += rs.recv_packets;
+                                sum_mos    += rs.mos;
+                                sum_loss   += rs.loss_rate_pct;
+                                sum_jitter += rs.jitter_ms;
+                            }
+                            snap.rtp_mos          = Some(sum_mos / n);
+                            snap.rtp_loss_pct     = Some(sum_loss / n);
+                            snap.rtp_jitter_ms    = Some(sum_jitter / n);
+                            snap.rtp_sent_packets = Some(total_sent);
+                            snap.rtp_recv_packets = Some(total_recv);
+                        }
+                    }
+                    snap.finished = finished.load(std::sync::atomic::Ordering::Relaxed);
+                    let done = snap.finished;
+                    cb(snap, progress);
                     if !unlimited && elapsed >= duration { break; }
+                    if done { break; }
                 }
             });
         }
@@ -736,6 +769,8 @@ impl Engine {
 
             time::sleep(Duration::from_micros(500)).await;
         }
+
+        engine_finished.store(true, std::sync::atomic::Ordering::Relaxed);
 
         // ── 產生最終報告 ──
         let snap    = live.snapshot();

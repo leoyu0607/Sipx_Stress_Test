@@ -152,7 +152,7 @@ impl RtpSession {
                                     .duration_since(UNIX_EPOCH)
                                     .unwrap_or_default()
                                     .as_micros() as u64;
-                                stats.on_recv(pkt.sequence, pkt.timestamp, now_us);
+                                stats.on_recv(pkt.ssrc, pkt.sequence, pkt.timestamp, now_us);
                                 debug!("RTP recv seq={} ts={}", pkt.sequence, pkt.timestamp);
                             }
                         }

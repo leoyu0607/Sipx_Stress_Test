@@ -36,8 +36,9 @@
 | **REGISTER + Digest 認證** | 完整 RFC 2617 Digest 流程（401/407 challenge → MD5 response → re-REGISTER 自動刷新）|
 | **真實 RTP** | 每 20ms 傳送 G.711 **PCMA**（A-law）封包，支援 WAV 音檔自動轉檔（PCM16/A-law/μ-law → PCMA）|
 | **聲音品質分析** | MOS 估算（ITU-T E-Model G.107）、掉包率、Jitter（RFC 3550） |
-| **總通數上限** | 民眾模式可設定 `--max-calls N`，達上限後自動停止（不依時長） |
+| **總通數上限** | 民眾模式可設定 `--max-calls N`，達上限後自動停止（不依時長）；GUI 前端自動偵測引擎完成並停止 |
 | **即時計數** | 儀表板同步顯示成功通數、失敗通數、佇列通數、Error Rate |
+| **即時 RTP 品質** | 測試期間即時顯示 MOS / 掉包率 / Jitter / 封包統計，不需等測試結束 |
 | **HTML 報告** | 含環形指標圖、延遲分位數長條圖、RTP 品質區塊，可離線檢視；GUI 與 CLI 均支援 |
 | **GUI 匯出** | TitleBar 一鍵匯出 JSON / CSV / **HTML** 三種格式 |
 | **SIP Log** | 每次壓測自動產生帶時間戳記的完整 SIP 訊息 log |
@@ -85,7 +86,7 @@ sipress/
 │       ├── engine.rs             ← 民眾端壓測主引擎（並發通話控制）
 │       ├── agent_engine.rs       ← 座席端壓測引擎（REGISTER + 等待來電 + 自動接聽）
 │       ├── registrar.rs          ← 一次性 REGISTER 握手（Phase 1：新增帳號立即驗證）
-│       ├── stats.rs              ← 指標收集（ASR/ACD/PDD/延遲/RTP）
+│       ├── stats.rs              ← 指標收集（ASR/ACD/PDD/延遲/即時 RTP 品質/finished 旗標）
 │       ├── reporter.rs           ← 終端機輸出（Table / JSON / CSV）
 │       ├── html_reporter.rs      ← HTML 報告產生器
 │       ├── sip_logger.rs         ← SIP 完整訊息 log 記錄器
@@ -131,7 +132,7 @@ sipress/
 - **頂部 TitleBar**：顯示狀態、進度條，▶ Start / ■ Stop 按鈕，及 **↓ JSON / ↓ CSV / ↓ HTML** 匯出按鈕（HTML 需測試完成後才啟用）
 - **中間 MetricStrip**：即時顯示 CPS、CONCUR、**SUCCESS（成功通數）**、**FAILED（失敗通數）**、**QUEUED（佇列通數）**、ASR、**ERR%（Error Rate）**、PDD
 - **圖表區**：折線圖（CPS / ASR / CCR / ERR 趨勢）
-- **右側面板**：回應碼統計、RTP 品質（**MOS / 掉包率 / Jitter**）、SIP flow 時序
+- **右側面板**：回應碼統計、**即時** RTP 品質（**MOS / 掉包率 / Jitter / 封包統計**，測試中即時更新）、SIP flow 時序
 - **底部 LogPanel**：即時 SIP 事件日誌（color-coded）
 
 > 詳細使用步驟請參閱 [howtouse.md](howtouse.md)
@@ -209,9 +210,13 @@ UAC (sipress)              UAS (軟交換機)
        │
        ├── 為每個 AgentAccount spawn 一個 task：
        │       1. REGISTER（含 Digest 重送）
-       │       2. 等待 INVITE → 自動 100 Trying → 200 OK + SDP（PCMA）
-       │       3. 處理 ACK / RE-INVITE / BYE / CANCEL / OPTIONS
-       │       4. 在 Expires/2 計時器到期時 re-REGISTER
+       │       2. 等待 INVITE → 100 Trying → 180 Ringing → 200 OK + SDP（PCMA）
+       │       3. 等待 ACK（10s timeout → 主動 BYE）
+       │       4. 啟動真實 RTP 收發（若 enable_rtp）
+       │       5. 處理 RE-INVITE（更新 RTP 目標）/ BYE / CANCEL / OPTIONS
+       │       6. BYE timeout（150s → 主動 BYE）
+       │       7. 通話結束後自動 re-REGISTER 維持在線
+       │       8. 在 Expires/2 計時器到期時 re-REGISTER
        │
        └── 測試時間到 → 通知所有 task 發 REGISTER Expires=0 → 結束
 ```
@@ -253,16 +258,24 @@ extension,username,password,domain
 
 | 收到的請求 | 自動回應 |
 |---|---|
-| `INVITE` 新通話 | `100 Trying` → `200 OK` + SDP（PCMA） |
-| `INVITE` （已建立 dialog） | RE-INVITE 視為保活，回 `200 OK` + SDP |
-| `ACK` | 不需回應 |
-| `BYE` | `200 OK`，計入 calls_completed |
+| `INVITE` 新通話 | `100 Trying` → `180 Ringing` → `200 OK` + SDP（PCMA）；啟動真實 RTP（若 enable_rtp） |
+| `INVITE` （已建立 dialog） | RE-INVITE 視為保活，回 `200 OK` + SDP；更新 RTP 目標地址 |
+| `ACK` | 標記通話已建立（10s 未收到 → 座席主動 BYE） |
+| `BYE` | `200 OK`，停止 RTP，計入 calls_completed |
+| （BYE timeout） | 通話 150s 未收到 BYE → 座席主動送 BYE 掛斷 |
 | `CANCEL` | `200 OK`（CANCEL）+ `487 Request Terminated`（INVITE） |
 | `OPTIONS` | `200 OK`（健康檢查） |
 
-### 限制
+### 座席端 RTP
 
-- 目前 SDP 中宣告的 RTP port 是隨機數字，**未真實綁定**也未收/送 RTP；對方送來的音訊會被丟棄。若交換機要求媒體必須暢通才認為通話健康，可能會 BYE 通話。Phase 3 會補上真實 RTP。
+座席模式現已支援真實 RTP 收發（與民眾模式共用 `RtpSession` 基礎設施）：
+- 當 `enable_rtp = true` 時，接聽來電時分配真實 RTP port、啟動 G.711A 音訊傳送與品質統計
+- 進度 task 每秒聚合所有活躍 session 的 MOS / 掉包率 / Jitter，前端即時顯示
+- RE-INVITE 時自動更新 RTP 目標地址
+- 通話結束後自動 re-REGISTER 維持在線，確保交換機持續分配來電
+
+### 注意事項
+
 - 測試前用 GUI 「快速生成帳號」做的 `register_account` 是短期 socket，與壓測時 `AgentEngine` 持有的 socket 是兩條線；同帳號雙路 Contact 在嚴格的交換機上可能會被拒。建議：壓測前先確認帳號可註冊（看 badge 變綠），開始測試後不要再按「重新註冊」。
 
 
@@ -279,12 +292,21 @@ sipress (UAC for REGISTER, UAS for INVITE)        軟交換機
      │                                                  │
      │◀─── INVITE (sip:agent@host) ─────────────────────│  外部使用者來電
      │──── 100 Trying ─────────────────────────────────▶│
-     │──── 200 OK + SDP (PCMA) ────────────────────────▶│  自動接聽
-     │◀─── ACK ─────────────────────────────────────────│
+     │──── 180 Ringing ────────────────────────────────▶│
+     │──── 200 OK + SDP (PCMA, 真實 RTP port) ────────▶│  自動接聽
+     │◀─── ACK ─────────────────────────────────────────│  （10s 未收到 → 主動 BYE）
      │                                                  │
+     │═══ RTP G.711 音訊流（若 enable_rtp）════════════▶│
+     │◀══ RTP G.711 音訊流 ═════════════════════════════│
      │                                                  │
-     │◀─── BYE ─────────────────────────────────────────│  對方掛斷
-     │──── 200 OK ─────────────────────────────────────▶│
+     │◀─── RE-INVITE ──────────────────────────────────│  Session-Expires 保活
+     │──── 200 OK + SDP ───────────────────────────────▶│  更新 RTP 目標地址
+     │                                                  │
+     │◀─── BYE ─────────────────────────────────────────│  對方掛斷（或 150s timeout → 主動 BYE）
+     │──── 200 OK ─────────────────────────────────────▶│  停止 RTP
+     │                                                  │
+     │──── REGISTER (re-register) ─────────────────────▶│  通話結束後自動 re-REGISTER 維持在線
+     │◀─── 200 OK ──────────────────────────────────────│
      │                                                  │
      │           （測試結束）                           │
      │──── REGISTER (Expires=0) ───────────────────────▶│  解除註冊
@@ -572,6 +594,8 @@ npm run tauri dev   # 開啟視窗，hot-reload 前端
 - **主控迴圈**：處理 SIP 事件 → 掃描逾時 → 依 CPS 發起新通話 → 判斷結束
 - **Graceful Stop**：透過 `stop_handle()` 回傳 `watch::Sender<bool>`，外部呼叫 `.send(true)` 後引擎停止發起新通話，對所有 `Connected` 通話發 BYE、`Calling/Trying/Ringing` 通話發 CANCEL，等待 BYE 回應後才產生最終報告
 - RTP session 在收到 200 OK 後啟動（傳入 `pre_bound` 預分配 socket），BYE 後停止並收集統計
+- 進度 task 每秒聚合所有活躍 RtpSession 的 MOS/loss/jitter 填入 `StatsSnapshot`，前端即時顯示
+- 主迴圈結束後設定 `engine_finished` AtomicBool → `StatsSnapshot.finished = true`，前端偵測後自動停止
 - 2xx ACK 使用 Contact URI 作為 Request-URI；non-2xx ACK 使用原始 INVITE branch
 - 收到伺服器 RE-INVITE（Session-Expires）→ 自動 200 OK 保活，並解析 SDP 更新 RTP 目標地址（避免對端換 port 後音訊送錯）；收到伺服器 BYE → 自動 200 OK
 
@@ -625,6 +649,7 @@ engine 主控迴圈（收到 200 OK 後）:
 RTP 品質統計，所有計算均符合 RFC 3550 標準：
 - **Jitter**（RFC 3550 §A.8）：EWMA 指數加權移動平均，8kHz clock 單位
 - **掉包率**（RFC 3550 §A.3）：以序號空間計算，追蹤 `first_seq`、`max_seq`、`seq_cycles`（wrap-around 計數），確保長時通話中序號回繞仍能正確統計 `expected` 封包數。**當完全未收到對端 RTP 但已成功送出封包時，以 sent 為基準回報 100% loss**（避免零收包被誤判為「無損 → MOS 優良」）
+- **SSRC 切換追蹤**：RE-INVITE 後對端可能更換 SSRC，序號跳到完全不同的範圍。`on_recv()` 偵測到 SSRC 變更時，將舊 SSRC 的 (expected, received) 累積到 `prior_expected` / `prior_received`，重置序號追蹤後以新 SSRC 重新開始，避免跨 SSRC 序號空間造成假掉包
 - **MOS**（ITU-T E-Model G.107）：由掉包率與 Jitter 估算 G.711 通話品質分數（1.0 ~ 5.0）
 - **on_send 計數**：僅在 `socket.send()` 成功後才計入，避免送失敗的封包被計為已送出
 
@@ -638,7 +663,7 @@ RTP 品質統計，所有計算均符合 RFC 3550 標準：
 |---------|------|
 | `start_test(config)` | 啟動壓測（背景非同步，立即回傳）。依 `config.mode` 自動分派到 `Engine`（Caller）或 `AgentEngine`（Agent） |
 | `stop_test()` | 手動停止（graceful）；民眾模式會對所有進行中通話發 BYE / 未接通的發 CANCEL；座席模式會發 `REGISTER Expires=0` 解除註冊 |
-| `get_snapshot()` | 取得即時 `StatsSnapshot`（前端每秒輪詢） |
+| `get_snapshot()` | 取得即時 `StatsSnapshot`（前端每秒輪詢），含即時 RTP 品質與 `finished` 旗標 |
 | `get_report()` | 取得最終 `FinalReport`（壓測完成後） |
 | `get_html_report(server_addr, timestamp)` | 產生 HTML 報告字串（前端下載為 `.html` 檔）；`server_addr` 會顯示在報告標頭 |
 | `register_account(server, domain, username, password, expires, transport)` | 對單一帳號發起一次性 REGISTER（含 401 Digest 重送），用於座席模式新增帳號時的即時驗證 |
@@ -649,11 +674,15 @@ RTP 品質統計，所有計算均符合 RFC 3550 標準：
 
 1. **REGISTER**：初次無認證 → 收 401 解析 `WWW-Authenticate: Digest` → 用 MD5 計算 response → 重送
 2. **保持註冊**：在 `Expires/2` 計時器到期時 re-REGISTER（沿用快取的 challenge）
-3. **接受來電**：收到 INVITE → 100 Trying → 200 OK + SDP（PCMA）→ 等 ACK
-4. **保活**：收到 RE-INVITE（Session-Expires）→ 200 OK + SDP
-5. **掛斷**：收到 BYE → 200 OK
-6. **CANCEL / OPTIONS**：自動處理（487 / 200 OK）
-7. **結束**：收到外部停止訊號 → REGISTER Expires=0 → exit
+3. **接受來電**：收到 INVITE → 100 Trying → 180 Ringing → 200 OK + SDP（PCMA, 真實 RTP port）
+4. **等待 ACK**：10s 未收到 ACK → 座席主動 BYE
+5. **真實 RTP**：啟動 `RtpSession` 收發 G.711A 音訊（若 `enable_rtp`），收集 MOS / 掉包 / Jitter
+6. **保活**：收到 RE-INVITE（Session-Expires）→ 200 OK + SDP + 更新 RTP 目標地址
+7. **掛斷**：收到 BYE → 200 OK → 停止 RTP；150s timeout → 主動 BYE
+8. **通話後 re-REGISTER**：每次通話結束後自動 re-REGISTER 維持在線
+9. **CANCEL / OPTIONS**：自動處理（487 / 200 OK）
+10. **結束**：收到外部停止訊號 → REGISTER Expires=0 → exit
+11. **完成通知**：主迴圈結束後設定 `engine_finished` → `StatsSnapshot.finished = true`，前端自動停止
 
 ### `core/src/sip/register.rs`
 
