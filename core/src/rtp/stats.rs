@@ -324,4 +324,80 @@ mod tests {
             "SSRC change should not cause phantom loss, got {}%", snap.loss_rate_pct);
         assert_eq!(snap.recv_packets, 10);
     }
+
+    #[test]
+    fn test_aggregate_snapshots_empty() {
+        assert!(aggregate_snapshots(&[]).is_none());
+    }
+
+    #[test]
+    fn test_aggregate_snapshots_single() {
+        let snap = RtpStatsSnapshot {
+            sent_packets: 100, recv_packets: 95, lost_packets: 5,
+            loss_rate_pct: 5.0, jitter_ms: 10.0, mos: 4.0,
+            out_of_order: 2, duplicates: 1,
+        };
+        let agg = aggregate_snapshots(&[snap.clone()]).unwrap();
+        assert_eq!(agg.sent_packets, 100);
+        assert_eq!(agg.recv_packets, 95);
+        assert!((agg.mos - 4.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_aggregate_snapshots_averages_rates() {
+        let a = RtpStatsSnapshot {
+            sent_packets: 100, recv_packets: 90, lost_packets: 10,
+            loss_rate_pct: 10.0, jitter_ms: 20.0, mos: 3.0,
+            out_of_order: 2, duplicates: 0,
+        };
+        let b = RtpStatsSnapshot {
+            sent_packets: 200, recv_packets: 198, lost_packets: 2,
+            loss_rate_pct: 1.0, jitter_ms: 5.0, mos: 4.5,
+            out_of_order: 0, duplicates: 1,
+        };
+        let agg = aggregate_snapshots(&[a, b]).unwrap();
+        assert_eq!(agg.sent_packets, 300);
+        assert_eq!(agg.recv_packets, 288);
+        assert!((agg.loss_rate_pct - 5.5).abs() < 0.001);
+        assert!((agg.jitter_ms - 12.5).abs() < 0.001);
+        assert!((agg.mos - 3.75).abs() < 0.001);
+        assert_eq!(agg.out_of_order, 2);
+        assert_eq!(agg.duplicates, 1);
+    }
+
+    #[test]
+    fn test_snapshot_and_loss_rate_consistent() {
+        let stats = RtpStats::new();
+        let ssrc = 0x11111111;
+        for i in 0..10u16 {
+            stats.on_send(160);
+            stats.on_recv(ssrc, 100 + i, i as u32 * 160, i as u64 * 20_000);
+        }
+        let snap = stats.snapshot();
+        let rate = stats.packet_loss_rate();
+        assert!((snap.loss_rate_pct / 100.0 - rate).abs() < 0.001,
+            "snapshot and packet_loss_rate should agree: snap={} rate={}", snap.loss_rate_pct, rate);
+    }
+
+    #[test]
+    fn test_send_only_shows_total_loss() {
+        let stats = RtpStats::new();
+        for _ in 0..5 {
+            stats.on_send(160);
+        }
+        let rate = stats.packet_loss_rate();
+        assert!((rate - 1.0).abs() < 0.001, "send-only should show 100% loss");
+    }
+
+    #[test]
+    fn test_jitter_increases_with_variation() {
+        let stats = RtpStats::new();
+        let ssrc = 0x12345678;
+        stats.on_recv(ssrc, 100, 0, 0);
+        stats.on_recv(ssrc, 101, 160, 20_000);
+        let j1 = stats.jitter_ms();
+        stats.on_recv(ssrc, 102, 320, 100_000);
+        let j2 = stats.jitter_ms();
+        assert!(j2 > j1, "jitter should increase with timing variation: j1={} j2={}", j1, j2);
+    }
 }

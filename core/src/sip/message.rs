@@ -376,8 +376,11 @@ impl SipResponse {
                     }
                 }
             }
-            if rtp_port.is_some() && in_audio_section {
-                break; // audio section 處理完畢
+            // 找到 audio port 後，繼續讀取直到遇到下一個 m= 行（或結束），
+            // 確保 media-level c= 能覆蓋 session-level c=
+            if rtp_port.is_some() && in_audio_section
+                && !line.starts_with("m=audio") && line.starts_with("m=") {
+                break;
             }
         }
 
@@ -400,5 +403,180 @@ impl SipResponse {
             }
         }
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ─── SDP parsing ─────────────────────────────────────────────
+
+    #[test]
+    fn sdp_rtp_addr_session_level_c() {
+        let raw = "SIP/2.0 200 OK\r\nContent-Length: 100\r\n\r\n\
+                   v=0\r\n\
+                   o=- 1 1 IN IP4 10.0.0.1\r\n\
+                   s=-\r\n\
+                   c=IN IP4 10.0.0.1\r\n\
+                   t=0 0\r\n\
+                   m=audio 20000 RTP/AVP 8\r\n\
+                   a=rtpmap:8 PCMA/8000\r\n";
+        let addr = SipResponse::sdp_rtp_addr(raw, "192.168.1.1");
+        assert_eq!(addr, Some("10.0.0.1:20000".to_string()));
+    }
+
+    #[test]
+    fn sdp_rtp_addr_media_level_c_overrides_session() {
+        let raw = "SIP/2.0 200 OK\r\n\r\n\
+                   v=0\r\n\
+                   c=IN IP4 10.0.0.1\r\n\
+                   t=0 0\r\n\
+                   m=audio 20000 RTP/AVP 8\r\n\
+                   c=IN IP4 172.16.0.5\r\n\
+                   a=rtpmap:8 PCMA/8000\r\n";
+        let addr = SipResponse::sdp_rtp_addr(raw, "192.168.1.1");
+        assert_eq!(addr, Some("172.16.0.5:20000".to_string()));
+    }
+
+    #[test]
+    fn sdp_rtp_addr_fallback_ip_when_no_c_line() {
+        let raw = "SIP/2.0 200 OK\r\n\r\n\
+                   v=0\r\n\
+                   t=0 0\r\n\
+                   m=audio 16000 RTP/AVP 8\r\n";
+        let addr = SipResponse::sdp_rtp_addr(raw, "192.168.1.1");
+        assert_eq!(addr, Some("192.168.1.1:16000".to_string()));
+    }
+
+    #[test]
+    fn sdp_rtp_addr_zero_ip_uses_fallback() {
+        let raw = "SIP/2.0 200 OK\r\n\r\n\
+                   v=0\r\n\
+                   c=IN IP4 0.0.0.0\r\n\
+                   m=audio 16000 RTP/AVP 8\r\n";
+        let addr = SipResponse::sdp_rtp_addr(raw, "10.1.1.1");
+        assert_eq!(addr, Some("10.1.1.1:16000".to_string()));
+    }
+
+    #[test]
+    fn sdp_rtp_port_basic() {
+        let raw = "SIP/2.0 200 OK\r\n\r\nm=audio 18000 RTP/AVP 8\r\n";
+        assert_eq!(SipResponse::sdp_rtp_port(raw), Some(18000));
+    }
+
+    // ─── SIP message construction ────────────────────────────────
+
+    #[test]
+    fn invite_contains_required_headers() {
+        let msg = SipMessage::invite(
+            "abc@test", "1000", "10.0.0.1:5060", "2001",
+            "10.0.0.2:5060", "10.0.0.1:5070", 1,
+            "z9hG4bK-test", "tag123", "UDP", 16000,
+        );
+        assert!(msg.starts_with("INVITE sip:2001@10.0.0.2:5060 SIP/2.0\r\n"));
+        assert!(msg.contains("Call-ID: abc@test\r\n"));
+        assert!(msg.contains("CSeq: 1 INVITE\r\n"));
+        assert!(msg.contains("From: <sip:1000@10.0.0.1:5060>;tag=tag123\r\n"));
+        assert!(msg.contains("To: <sip:2001@10.0.0.2:5060>\r\n"));
+        assert!(msg.contains("m=audio 16000 RTP/AVP 8\r\n"));
+        assert!(msg.contains("Content-Type: application/sdp\r\n"));
+    }
+
+    #[test]
+    fn ack_uses_contact_uri_when_provided() {
+        let msg = SipMessage::ack(
+            "abc@test", "1000", "10.0.0.1", "2001", "srv-tag",
+            "10.0.0.2:5060", "10.0.0.1:5070", 1,
+            "z9hG4bK-ack", "tag123", "UDP",
+            Some("sip:2001@10.0.0.2:5061"),
+        );
+        assert!(msg.starts_with("ACK sip:2001@10.0.0.2:5061 SIP/2.0\r\n"));
+    }
+
+    #[test]
+    fn ack_falls_back_to_to_uri() {
+        let msg = SipMessage::ack(
+            "abc@test", "1000", "10.0.0.1", "2001", "srv-tag",
+            "10.0.0.2:5060", "10.0.0.1:5070", 1,
+            "z9hG4bK-ack", "tag123", "UDP", None,
+        );
+        assert!(msg.starts_with("ACK sip:2001@10.0.0.2:5060 SIP/2.0\r\n"));
+    }
+
+    #[test]
+    fn bye_contains_correct_cseq() {
+        let msg = SipMessage::bye(
+            "abc@test", "1000", "10.0.0.1", "2001", "srv-tag",
+            "10.0.0.2:5060", "10.0.0.1:5070", 2,
+            "z9hG4bK-bye", "tag123", "UDP", None,
+        );
+        assert!(msg.contains("CSeq: 2 BYE\r\n"));
+        assert!(msg.contains(";tag=srv-tag\r\n"));
+    }
+
+    #[test]
+    fn cancel_preserves_branch() {
+        let msg = SipMessage::cancel(
+            "abc@test", "1000", "10.0.0.1", "2001",
+            "10.0.0.2:5060", "10.0.0.1:5070", 1,
+            "z9hG4bK-orig", "tag123", "UDP",
+        );
+        assert!(msg.starts_with("CANCEL sip:2001@10.0.0.2:5060 SIP/2.0\r\n"));
+        assert!(msg.contains("branch=z9hG4bK-orig"));
+        assert!(msg.contains("CSeq: 1 CANCEL\r\n"));
+    }
+
+    #[test]
+    fn ok_for_server_bye_echoes_headers() {
+        let bye_req = "BYE sip:1000@10.0.0.1:5070 SIP/2.0\r\n\
+                       Via: SIP/2.0/UDP 10.0.0.2:5060;branch=z9hG4bK-srv\r\n\
+                       From: <sip:2001@10.0.0.2>;tag=srv-tag\r\n\
+                       To: <sip:1000@10.0.0.1>;tag=my-tag\r\n\
+                       Call-ID: test123@10.0.0.2\r\n\
+                       CSeq: 5 BYE\r\n\
+                       Content-Length: 0\r\n\
+                       \r\n";
+        let ok = SipMessage::ok_for_server_bye(bye_req);
+        assert!(ok.starts_with("SIP/2.0 200 OK\r\n"));
+        assert!(ok.contains("Call-ID: test123@10.0.0.2\r\n"));
+        assert!(ok.contains("CSeq: 5 BYE\r\n"));
+        assert!(ok.contains("tag=srv-tag"));
+        assert!(ok.contains("tag=my-tag"));
+    }
+
+    #[test]
+    fn ok_for_reinvite_includes_sdp() {
+        let reinvite = "INVITE sip:1000@10.0.0.1:5070 SIP/2.0\r\n\
+                        Via: SIP/2.0/UDP 10.0.0.2:5060;branch=z9hG4bK-ri\r\n\
+                        From: <sip:2001@10.0.0.2>;tag=srv-tag\r\n\
+                        To: <sip:1000@10.0.0.1>;tag=my-tag\r\n\
+                        Call-ID: test123@10.0.0.2\r\n\
+                        CSeq: 3 INVITE\r\n\
+                        \r\n";
+        let ok = SipMessage::ok_for_server_reinvite(reinvite, "10.0.0.1:5070", 18000);
+        assert!(ok.starts_with("SIP/2.0 200 OK\r\n"));
+        assert!(ok.contains("Content-Type: application/sdp\r\n"));
+        assert!(ok.contains("m=audio 18000 RTP/AVP 8\r\n"));
+    }
+
+    // ─── Unique ID generation ────────────────────────────────────
+
+    #[test]
+    fn branch_starts_with_magic_cookie() {
+        let branch = SipMessage::new_branch();
+        assert!(branch.starts_with("z9hG4bK-"), "branch must start with RFC 3261 magic cookie");
+    }
+
+    #[test]
+    fn tag_is_8_chars() {
+        let tag = SipMessage::new_tag();
+        assert_eq!(tag.len(), 8);
+    }
+
+    #[test]
+    fn call_id_contains_domain() {
+        let cid = SipMessage::new_call_id("example.com");
+        assert!(cid.ends_with("@example.com"));
     }
 }

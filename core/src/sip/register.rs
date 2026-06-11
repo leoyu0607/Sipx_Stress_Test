@@ -251,4 +251,50 @@ mod tests {
         assert!(h.contains("username=\"alice\""));
         assert!(h.contains("response=\""));
     }
+
+    #[test]
+    fn register_build_uses_server_as_domain() {
+        let msg = RegisterMessage::build(
+            "1001", "10.0.0.1:5066", "192.168.1.10:5070",
+            1, "z9hG4bK-test", "tag123", "call-1@test",
+            "UDP", 240, None,
+        );
+        assert!(msg.starts_with("REGISTER sip:10.0.0.1:5066 SIP/2.0\r\n"));
+        assert!(msg.contains("From: <sip:1001@10.0.0.1:5066>;tag=tag123"));
+        assert!(msg.contains("To: <sip:1001@10.0.0.1:5066>"));
+        assert!(msg.contains("Contact: <sip:1001@192.168.1.10:5070>"));
+        assert!(msg.contains("Expires: 240\r\n"));
+    }
+
+    #[test]
+    fn register_build_includes_allow_events() {
+        let msg = RegisterMessage::build(
+            "1001", "10.0.0.1:5066", "192.168.1.10:5070",
+            1, "z9hG4bK-test", "tag123", "call-1@test",
+            "UDP", 240, None,
+        );
+        assert!(msg.contains("Allow-Events: talk,hold,conference,refer,check-sync"));
+        assert!(msg.contains("Allow: INVITE, INFO, PRACK, ACK, BYE, CANCEL, OPTIONS, NOTIFY, REGISTER, SUBSCRIBE, REFER, PUBLISH, UPDATE, MESSAGE"));
+    }
+
+    #[test]
+    fn register_build_with_auth() {
+        let msg = RegisterMessage::build(
+            "1001", "10.0.0.1:5066", "192.168.1.10:5070",
+            2, "z9hG4bK-auth", "tag123", "call-1@test",
+            "UDP", 240, Some("Digest username=\"1001\", response=\"abc\""),
+        );
+        assert!(msg.contains("Authorization: Digest username=\"1001\", response=\"abc\""));
+        assert!(msg.contains("CSeq: 2 REGISTER\r\n"));
+    }
+
+    #[test]
+    fn register_deregister_expires_zero() {
+        let msg = RegisterMessage::build(
+            "1001", "10.0.0.1:5066", "192.168.1.10:5070",
+            3, "z9hG4bK-dereg", "tag123", "call-1@test",
+            "UDP", 0, None,
+        );
+        assert!(msg.contains("Expires: 0\r\n"));
+    }
 }

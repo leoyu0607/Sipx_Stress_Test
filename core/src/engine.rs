@@ -359,8 +359,8 @@ impl Engine {
                             });
                         }
                         200 if method.as_deref() == Some("BYE") => {
-                            if let Some(dur) = dialog.call_duration_secs() {
-                                detail.record_duration(dur);
+                            if let Some(a) = dialog.answered_at {
+                                detail.record_duration(a.elapsed().as_secs_f64());
                             }
                             if cfg.enable_rtp {
                                 let cid   = call_id.clone();
@@ -469,10 +469,12 @@ impl Engine {
                                     let _ = udp_ok.send(&ok_copy).await;
                                 });
 
-                                if cfg.enable_rtp && matches!(dialog.state, DialogState::Connected) {
+                                if matches!(dialog.state, DialogState::Connected | DialogState::Terminating) {
                                     if let Some(a) = dialog.answered_at {
                                         detail.record_duration(a.elapsed().as_secs_f64());
                                     }
+                                }
+                                if cfg.enable_rtp && matches!(dialog.state, DialogState::Connected | DialogState::Terminating) {
                                     let cid      = call_id.clone();
                                     let rtp_s    = Arc::clone(&rtp_sessions);
                                     let snaps    = Arc::clone(&rtp_snapshots);
@@ -567,8 +569,8 @@ impl Engine {
                                             }
                                         });
                                     }
-                                    if let Some(dur) = dialog.call_duration_secs() {
-                                        detail.record_duration(dur);
+                                    if let Some(a) = dialog.answered_at {
+                                        detail.record_duration(a.elapsed().as_secs_f64());
                                     }
                                     dialog.on_bye_ok(); // 強制標記為 Completed
                                     live.on_completed();

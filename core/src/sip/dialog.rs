@@ -157,3 +157,102 @@ impl Dialog {
         self.answered_at.is_some()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn new_dialog() -> Dialog {
+        Dialog::new("call-1".into(), "tag-1".into(), "branch-1".into(), "2001".into(), 16000)
+    }
+
+    #[test]
+    fn initial_state_is_calling() {
+        let d = new_dialog();
+        assert_eq!(d.state, DialogState::Calling);
+        assert!(!d.is_answered());
+    }
+
+    #[test]
+    fn normal_call_flow() {
+        let mut d = new_dialog();
+
+        d.on_trying();
+        assert_eq!(d.state, DialogState::Trying);
+
+        d.on_ringing();
+        assert_eq!(d.state, DialogState::Ringing);
+        assert!(d.pdd_ms().is_some());
+
+        d.on_ok("to-tag".into());
+        assert_eq!(d.state, DialogState::Connected);
+        assert!(d.is_answered());
+        assert!(d.setup_time_ms().is_some());
+        assert_eq!(d.to_tag, Some("to-tag".to_string()));
+
+        d.on_bye_sent();
+        assert_eq!(d.state, DialogState::Terminating);
+        assert!(d.bye_sent_at.is_some());
+
+        d.on_bye_ok();
+        assert_eq!(d.state, DialogState::Completed);
+        assert!(d.ended_at.is_some());
+        assert!(d.call_duration_secs().is_some());
+    }
+
+    #[test]
+    fn skip_trying_directly_to_ringing() {
+        let mut d = new_dialog();
+        d.on_ringing();
+        assert_eq!(d.state, DialogState::Ringing);
+    }
+
+    #[test]
+    fn skip_to_200ok_from_calling() {
+        let mut d = new_dialog();
+        d.on_ok("tag".into());
+        assert_eq!(d.state, DialogState::Connected);
+    }
+
+    #[test]
+    fn error_response_records_code() {
+        let mut d = new_dialog();
+        d.on_trying();
+        d.on_error(486);
+        assert_eq!(d.state, DialogState::Failed(486));
+        assert!(d.ended_at.is_some());
+    }
+
+    #[test]
+    fn timeout_sets_state() {
+        let mut d = new_dialog();
+        d.on_timeout();
+        assert_eq!(d.state, DialogState::TimedOut);
+    }
+
+    #[test]
+    fn ringing_only_from_early_states() {
+        let mut d = new_dialog();
+        d.on_ok("tag".into());
+        let prev = d.state.clone();
+        d.on_ringing();
+        assert_eq!(d.state, prev, "ringing should not change Connected state");
+    }
+
+    #[test]
+    fn ok_only_from_early_states() {
+        let mut d = new_dialog();
+        d.on_ok("tag1".into());
+        d.on_bye_sent();
+        let prev = d.state.clone();
+        d.on_ok("tag2".into());
+        assert_eq!(d.state, prev, "OK should not change Terminating state");
+    }
+
+    #[test]
+    fn duration_requires_completed_state() {
+        let mut d = new_dialog();
+        d.on_ok("tag".into());
+        assert!(d.call_duration_secs().is_none(), "duration requires Completed state");
+    }
+}
