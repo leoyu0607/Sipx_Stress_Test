@@ -68,7 +68,7 @@ pub async fn register_once(
 
     // ── 第一次 REGISTER（不帶 Authorization）──
     let req1 = RegisterMessage::build(
-        username, domain, server_addr, &local_sock_str,
+        username, server_addr, &local_sock_str,
         1, &branch1, &from_tag, &call_id, transport, expires, None,
     );
     if let Err(e) = sock.send(req1.as_bytes()).await {
@@ -112,7 +112,7 @@ pub async fn register_once(
 
             let branch2 = SipMessage::new_branch();
             let req2 = RegisterMessage::build(
-                username, domain, server_addr, &local_sock_str,
+                username, server_addr, &local_sock_str,
                 2, &branch2, &from_tag, &call_id, transport, expires,
                 Some(&auth_value),
             );

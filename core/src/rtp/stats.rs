@@ -145,65 +145,15 @@ impl RtpStats {
     /// 掉包率（0.0 ~ 1.0）
     /// 依接收端序號空間計算：(expected - received) / expected（RFC 3550 §A.3）
     /// 包含 SSRC 切換前累積的統計，避免跨 SSRC 序號空間造成假掉包
-    /// 若完全未收到封包但已送出封包，回傳 1.0（100% loss）
     pub fn packet_loss_rate(&self) -> f64 {
-        let sent     = self.sent_packets.load(Ordering::Relaxed);
-        let recv     = self.recv_packets.load(Ordering::Relaxed);
-        let first    = *self.first_seq.lock().unwrap();
-        let max      = *self.max_seq.lock().unwrap();
-        let cycles   = self.seq_cycles.load(Ordering::Relaxed);
-        let prior_e  = self.prior_expected.load(Ordering::Relaxed);
-        let prior_r  = self.prior_received.load(Ordering::Relaxed);
-
-        let cur_expected = match (first, max) {
-            (Some(f), Some(m)) => cycles * 65536 + m.wrapping_sub(f) as u64 + 1,
-            _ => 0,
-        };
-        let cur_recv = recv.saturating_sub(prior_r);
-
-        let total_expected = prior_e + cur_expected;
-        let total_recv     = prior_r + cur_recv;
-
-        if total_expected > 0 {
-            let lost = total_expected.saturating_sub(total_recv);
-            lost as f64 / total_expected as f64
-        } else if sent > 0 {
-            1.0
-        } else {
-            0.0
-        }
+        self.loss_details().1
     }
 
     /// 快照
     pub fn snapshot(&self) -> RtpStatsSnapshot {
-        let sent      = self.sent_packets.load(Ordering::Relaxed);
-        let recv      = self.recv_packets.load(Ordering::Relaxed);
-        let first     = *self.first_seq.lock().unwrap();
-        let max       = *self.max_seq.lock().unwrap();
-        let cycles    = self.seq_cycles.load(Ordering::Relaxed);
-        let prior_e   = self.prior_expected.load(Ordering::Relaxed);
-        let prior_r   = self.prior_received.load(Ordering::Relaxed);
-
-        // 當前 SSRC 的 seq 空間（RFC 3550 §A.3）
-        let cur_expected = match (first, max) {
-            (Some(f), Some(m)) => cycles * 65536 + m.wrapping_sub(f) as u64 + 1,
-            _ => 0,
-        };
-        let cur_recv = recv.saturating_sub(prior_r);
-
-        // 合併所有 SSRC 週期的統計
-        let total_expected = prior_e + cur_expected;
-        let total_recv     = prior_r + cur_recv;
-
-        let (_expected, lost, loss_rate) = if total_expected > 0 {
-            let lost = total_expected.saturating_sub(total_recv);
-            (total_expected, lost, lost as f64 / total_expected as f64)
-        } else if sent > 0 {
-            (sent, sent, 1.0)
-        } else {
-            (0, 0, 0.0)
-        };
-
+        let sent = self.sent_packets.load(Ordering::Relaxed);
+        let recv = self.recv_packets.load(Ordering::Relaxed);
+        let (lost, loss_rate) = self.loss_details();
         let jitter_ms = self.jitter_ms();
         let mos       = estimate_mos(loss_rate, jitter_ms);
 
@@ -216,6 +166,33 @@ impl RtpStats {
             mos,
             out_of_order:  self.out_of_order.load(Ordering::Relaxed),
             duplicates:    self.duplicates.load(Ordering::Relaxed),
+        }
+    }
+
+    fn loss_details(&self) -> (u64, f64) {
+        let sent    = self.sent_packets.load(Ordering::Relaxed);
+        let recv    = self.recv_packets.load(Ordering::Relaxed);
+        let first   = *self.first_seq.lock().unwrap();
+        let max     = *self.max_seq.lock().unwrap();
+        let cycles  = self.seq_cycles.load(Ordering::Relaxed);
+        let prior_e = self.prior_expected.load(Ordering::Relaxed);
+        let prior_r = self.prior_received.load(Ordering::Relaxed);
+
+        let cur_expected = match (first, max) {
+            (Some(f), Some(m)) => cycles * 65536 + m.wrapping_sub(f) as u64 + 1,
+            _ => 0,
+        };
+        let cur_recv = recv.saturating_sub(prior_r);
+        let total_expected = prior_e + cur_expected;
+        let total_recv     = prior_r + cur_recv;
+
+        if total_expected > 0 {
+            let lost = total_expected.saturating_sub(total_recv);
+            (lost, lost as f64 / total_expected as f64)
+        } else if sent > 0 {
+            (sent, 1.0)
+        } else {
+            (0, 0.0)
         }
     }
 }
@@ -241,6 +218,21 @@ impl RtpStatsSnapshot {
     pub fn mos_label(&self) -> &'static str {
         mos_label(self.mos)
     }
+}
+
+pub fn aggregate_snapshots(snapshots: &[RtpStatsSnapshot]) -> Option<RtpStatsSnapshot> {
+    if snapshots.is_empty() { return None; }
+    let n = snapshots.len() as f64;
+    Some(RtpStatsSnapshot {
+        sent_packets:  snapshots.iter().map(|s| s.sent_packets).sum(),
+        recv_packets:  snapshots.iter().map(|s| s.recv_packets).sum(),
+        lost_packets:  snapshots.iter().map(|s| s.lost_packets).sum(),
+        loss_rate_pct: snapshots.iter().map(|s| s.loss_rate_pct).sum::<f64>() / n,
+        jitter_ms:     snapshots.iter().map(|s| s.jitter_ms).sum::<f64>() / n,
+        mos:           snapshots.iter().map(|s| s.mos).sum::<f64>() / n,
+        out_of_order:  snapshots.iter().map(|s| s.out_of_order).sum(),
+        duplicates:    snapshots.iter().map(|s| s.duplicates).sum(),
+    })
 }
 
 // ── MOS 估算（ITU-T E-Model 簡化版）────────────────────────────

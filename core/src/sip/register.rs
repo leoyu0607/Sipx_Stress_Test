@@ -10,7 +10,6 @@ impl RegisterMessage {
     #[allow(clippy::too_many_arguments)]
     pub fn build(
         username:    &str,
-        _domain:     &str,           // 已不使用，From/To 改用 server（含 port）
         server:      &str,           // 伺服器 ip:port (Request-URI + From/To domain)
         local_addr:  &str,           // 本機綁定 ip:port
         cseq:        u32,

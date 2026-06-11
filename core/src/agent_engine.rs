@@ -14,10 +14,10 @@
 use crate::config::{AgentAccount, Config};
 use crate::engine::ProgressCallback;
 use crate::rtp::session::{RtpSession, RtpSessionConfig};
-use crate::rtp::stats::RtpStatsSnapshot;
+use crate::rtp::stats::{aggregate_snapshots, RtpStatsSnapshot};
 use crate::sip::{
     register::{DigestChallenge, RegisterMessage},
-    SipMessage, SipResponse,
+    SipMessage, SipParser, SipResponse,
 };
 use crate::sip_logger::{Direction, SipLogger, SipRole};
 use crate::stats::{DetailedStats, FinalReport, LiveStats};
@@ -230,51 +230,27 @@ impl AgentEngine {
     }
 }
 
-/// 聚合多個 RTP stats 的平均值
 fn aggregate_rtp_stats(stats_list: &[Arc<crate::rtp::stats::RtpStats>]) -> Option<RtpStatsSnapshot> {
-    if stats_list.is_empty() { return None; }
-    let mut total_sent: u64 = 0;
-    let mut total_recv: u64 = 0;
-    let mut total_ooo:  u64 = 0;
-    let mut total_lost: u64 = 0;
-    let mut sum_mos:    f64 = 0.0;
-    let mut sum_jitter: f64 = 0.0;
-    let mut sum_loss:   f64 = 0.0;
-    let mut count = 0usize;
-    for s in stats_list {
-        let snap = s.snapshot();
-        total_sent += snap.sent_packets;
-        total_recv += snap.recv_packets;
-        total_ooo  += snap.out_of_order;
-        total_lost += snap.lost_packets;
-        sum_mos    += snap.mos;
-        sum_jitter += snap.jitter_ms;
-        sum_loss   += snap.loss_rate_pct;
-        count += 1;
-    }
-    let n = count as f64;
-    Some(RtpStatsSnapshot {
-        sent_packets:  total_sent,
-        recv_packets:  total_recv,
-        lost_packets:  total_lost,
-        loss_rate_pct: sum_loss / n,
-        jitter_ms:     sum_jitter / n,
-        mos:           sum_mos / n,
-        out_of_order:  total_ooo,
-        duplicates:    0,
-    })
+    let snaps: Vec<_> = stats_list.iter().map(|s| s.snapshot()).collect();
+    aggregate_snapshots(&snaps)
 }
 
 // ─── 單一帳號 runner ──────────────────────────────────────────────
 
 struct DialogCtx {
-    invite_raw:     String,
-    local_to_tag:   String,
-    answered_at:    Instant,
-    remote_from_tag:  String,
-    _remote_rtp_addr: Option<String>,
-    rtp_session:    Option<RtpSession>,
-    ack_received:   bool,
+    invite_raw:      String,
+    local_to_tag:    String,
+    answered_at:     Instant,
+    remote_from_tag: String,
+    rtp_session:     Option<RtpSession>,
+    ack_received:    bool,
+}
+
+impl DialogCtx {
+    fn deadline(&self) -> Instant {
+        let secs = if self.ack_received { BYE_TIMEOUT_SECS } else { ACK_TIMEOUT_SECS };
+        self.answered_at + Duration::from_secs(secs)
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -320,7 +296,7 @@ async fn account_runner(
     log.log_event(&account.extension, "開始 REGISTER");
 
     if let Err(e) = send_register(
-        &sock, &log, &server_addr_str, &domain, &local_addr,
+        &sock, &log, &server_addr_str, &local_addr,
         &account, &reg_from_tag, &reg_call_id, transport_str,
         initial_expires, None, &mut *reg_state.lock().await,
     ).await {
@@ -334,22 +310,12 @@ async fn account_runner(
     loop {
         let refresh_at = last_register_at + Duration::from_secs((current_expires as u64 / 2).max(60));
 
-        // 計算最近的通話 timeout（ACK 或 BYE）
         let next_timeout = {
             let dlgs = dialogs.lock().await;
-            let mut earliest: Option<tokio::time::Instant> = None;
-            for ctx in dlgs.values() {
-                let deadline = if !ctx.ack_received {
-                    ctx.answered_at + Duration::from_secs(ACK_TIMEOUT_SECS)
-                } else {
-                    ctx.answered_at + Duration::from_secs(BYE_TIMEOUT_SECS)
-                };
-                let t = tokio::time::Instant::from_std(deadline);
-                if earliest.is_none() || t < earliest.unwrap() {
-                    earliest = Some(t);
-                }
-            }
-            earliest.unwrap_or_else(|| tokio::time::Instant::now() + Duration::from_secs(3600))
+            dlgs.values()
+                .map(|ctx| tokio::time::Instant::from_std(ctx.deadline()))
+                .min()
+                .unwrap_or_else(|| tokio::time::Instant::now() + Duration::from_secs(3600))
         };
 
         tokio::select! {
@@ -363,7 +329,7 @@ async fn account_runner(
 
                 if raw.starts_with("SIP/2.0") {
                     handle_response(
-                        &raw, &sock, &log, &cfg, &server_addr_str, &domain, &local_addr,
+                        &raw, &sock, &log, &cfg, &server_addr_str, &local_addr,
                         &account, &reg_from_tag, &reg_call_id, transport_str,
                         &mut current_expires, &mut last_register_at,
                         Arc::clone(&reg_state),
@@ -376,7 +342,7 @@ async fn account_runner(
                     ).await;
                     if needs_reregister {
                         trigger_re_register(
-                            &sock, &log, &server_addr_str, &domain, &local_addr,
+                            &sock, &log, &server_addr_str, &local_addr,
                             &account, &reg_from_tag, &reg_call_id, transport_str,
                             current_expires, Arc::clone(&reg_state),
                         ).await;
@@ -398,7 +364,7 @@ async fn account_runner(
                                           &format!("sip:{}", server_addr_str))
                 });
                 let req = RegisterMessage::build(
-                    &account.username, &domain, &server_addr_str, &local_addr,
+                    &account.username, &server_addr_str, &local_addr,
                     cseq, &SipMessage::new_branch(), &reg_from_tag, &reg_call_id,
                     transport_str, current_expires, auth.as_deref(),
                 );
@@ -409,15 +375,9 @@ async fn account_runner(
             // 通話 timeout（ACK / BYE）→ 座席主動 BYE
             _ = time::sleep_until(next_timeout) => {
                 let mut dlgs = dialogs.lock().await;
+                let now = Instant::now();
                 let timed_out: Vec<String> = dlgs.iter()
-                    .filter(|(_, ctx)| {
-                        let deadline = if !ctx.ack_received {
-                            ctx.answered_at + Duration::from_secs(ACK_TIMEOUT_SECS)
-                        } else {
-                            ctx.answered_at + Duration::from_secs(BYE_TIMEOUT_SECS)
-                        };
-                        Instant::now() >= deadline
-                    })
+                    .filter(|(_, ctx)| now >= ctx.deadline())
                     .map(|(k, _)| k.clone())
                     .collect();
                 for call_id in timed_out {
@@ -440,7 +400,7 @@ async fn account_runner(
                         live.on_completed();
                         // 通話結束後 re-REGISTER 維持在線
                         trigger_re_register(
-                            &sock, &log, &server_addr_str, &domain, &local_addr,
+                            &sock, &log, &server_addr_str, &local_addr,
                             &account, &reg_from_tag, &reg_call_id, transport_str,
                             current_expires, Arc::clone(&reg_state),
                         ).await;
@@ -470,7 +430,7 @@ async fn account_runner(
                                           &format!("sip:{}", server_addr_str))
                 });
                 let req = RegisterMessage::build(
-                    &account.username, &domain, &server_addr_str, &local_addr,
+                    &account.username, &server_addr_str, &local_addr,
                     cseq, &SipMessage::new_branch(), &reg_from_tag, &reg_call_id,
                     transport_str, 0, auth.as_deref(),
                 );
@@ -497,7 +457,6 @@ async fn send_register(
     sock:        &UdpSocket,
     log:         &SipLogger,
     server_addr: &str,
-    domain:      &str,
     local_addr:  &str,
     account:     &AgentAccount,
     from_tag:    &str,
@@ -509,7 +468,7 @@ async fn send_register(
 ) -> Result<()> {
     state.cseq = state.cseq.wrapping_add(1);
     let req = RegisterMessage::build(
-        &account.username, domain, server_addr, local_addr,
+        &account.username, server_addr, local_addr,
         state.cseq, &SipMessage::new_branch(), from_tag, call_id,
         transport, expires, auth,
     );
@@ -524,7 +483,6 @@ async fn trigger_re_register(
     sock:        &UdpSocket,
     log:         &SipLogger,
     server_addr: &str,
-    domain:      &str,
     local_addr:  &str,
     account:     &AgentAccount,
     from_tag:    &str,
@@ -543,7 +501,7 @@ async fn trigger_re_register(
                               &format!("sip:{}", server_addr))
     });
     let req = RegisterMessage::build(
-        &account.username, domain, server_addr, local_addr,
+        &account.username, server_addr, local_addr,
         cseq, &SipMessage::new_branch(), from_tag, call_id,
         transport, expires, auth.as_deref(),
     );
@@ -561,7 +519,6 @@ async fn handle_response(
     log:                &SipLogger,
     _cfg:               &Config,
     server_addr_str:    &str,
-    domain:             &str,
     local_addr:         &str,
     account:            &AgentAccount,
     reg_from_tag:       &str,
@@ -596,7 +553,7 @@ async fn handle_response(
                     let mut st = reg_state.lock().await;
                     st.challenge = Some(chal);
                     if let Err(e) = send_register(
-                        sock, log, server_addr_str, domain, local_addr,
+                        sock, log, server_addr_str, local_addr,
                         account, reg_from_tag, reg_call_id, transport_str,
                         *current_expires, Some(&auth), &mut *st,
                     ).await {
@@ -635,13 +592,7 @@ async fn handle_request(
         .map(|s| s.to_uppercase())
         .unwrap_or_default();
 
-    let call_id = match raw.lines()
-        .find(|l| {
-            let lower = l.to_lowercase();
-            lower.starts_with("call-id:") || lower.starts_with("i:")
-        })
-        .and_then(|l| l.splitn(2, ':').nth(1))
-        .map(|s| s.trim().to_string())
+    let call_id = match SipParser::call_id(raw)
     { Some(c) => c, None => return false };
 
     match method.as_str() {
@@ -680,7 +631,7 @@ async fn handle_request(
                 let local_to_tag = SipMessage::new_tag();
 
                 // 從 INVITE 解析遠端 From-tag
-                let remote_from_tag = extract_from_tag(raw).unwrap_or_default();
+                let remote_from_tag = SipParser::from_tag(raw).unwrap_or_default();
 
                 // 100 Trying
                 let trying = build_response_no_body(raw, "100 Trying", "");
@@ -760,7 +711,6 @@ async fn handle_request(
                     local_to_tag,
                     answered_at,
                     remote_from_tag,
-                    _remote_rtp_addr: remote_rtp_addr,
                     rtp_session,
                     ack_received:    false,
                 };
@@ -939,25 +889,6 @@ fn inject_to_tag_if_missing(to_line: &str, tag: &str) -> String {
     } else {
         format!("{};tag={}", to_line.trim_end(), tag)
     }
-}
-
-fn extract_from_tag(raw: &str) -> Option<String> {
-    for line in raw.lines() {
-        let lower = line.to_lowercase();
-        if lower.starts_with("from:") || lower.starts_with("f:") {
-            return extract_tag(line);
-        }
-    }
-    None
-}
-
-fn extract_tag(header_line: &str) -> Option<String> {
-    let lower = header_line.to_lowercase();
-    let idx = lower.find(";tag=")?;
-    let rest = &header_line[idx + 5..];
-    let end = rest.find(|c: char| c == ';' || c == '>' || c == ' ' || c == '\r' || c == '\n')
-        .unwrap_or(rest.len());
-    Some(rest[..end].to_string())
 }
 
 fn extract_uri(header_line: &str) -> Option<String> {

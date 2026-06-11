@@ -460,11 +460,6 @@ export const useTestStore = defineStore('test', () => {
 
     clockTimer = setInterval(() => {
       elapsedSec.value++
-      // duration = 0 → unlimited, only stop via max_total_calls or manual stop
-      // finished flag handles all completion cases now
-      if (config.value.duration > 0 && elapsedSec.value >= config.value.duration) {
-        _finishTest()
-      }
     }, 1000)
   }
 

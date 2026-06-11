@@ -2,7 +2,7 @@
 use crate::config::{Config, Transport};
 use crate::rtp::{
     session::{RtpSession, RtpSessionConfig},
-    stats::RtpStatsSnapshot,
+    stats::{aggregate_snapshots, RtpStatsSnapshot},
 };
 use crate::sip::{Dialog, DialogState, SharedUdpSocket, SipMessage, SipParser, SipResponse};
 use crate::sip_logger::{Direction, SipLogger, SipRole};
@@ -207,29 +207,15 @@ impl Engine {
                     let progress = if unlimited { 0.0 } else { (elapsed / duration).min(1.0) };
                     let mut snap = live.snapshot();
 
-                    // 聚合所有活躍 RTP session 的即時品質
                     {
                         let sessions = rtp_sess.lock().await;
-                        if !sessions.is_empty() {
-                            let mut total_sent: u64 = 0;
-                            let mut total_recv: u64 = 0;
-                            let mut sum_mos    = 0.0_f64;
-                            let mut sum_loss   = 0.0_f64;
-                            let mut sum_jitter = 0.0_f64;
-                            let n = sessions.len() as f64;
-                            for s in sessions.values() {
-                                let rs = s.stats.snapshot();
-                                total_sent += rs.sent_packets;
-                                total_recv += rs.recv_packets;
-                                sum_mos    += rs.mos;
-                                sum_loss   += rs.loss_rate_pct;
-                                sum_jitter += rs.jitter_ms;
-                            }
-                            snap.rtp_mos          = Some(sum_mos / n);
-                            snap.rtp_loss_pct     = Some(sum_loss / n);
-                            snap.rtp_jitter_ms    = Some(sum_jitter / n);
-                            snap.rtp_sent_packets = Some(total_sent);
-                            snap.rtp_recv_packets = Some(total_recv);
+                        let snaps: Vec<_> = sessions.values().map(|s| s.stats.snapshot()).collect();
+                        if let Some(agg) = aggregate_snapshots(&snaps) {
+                            snap.rtp_mos          = Some(agg.mos);
+                            snap.rtp_loss_pct     = Some(agg.loss_rate_pct);
+                            snap.rtp_jitter_ms    = Some(agg.jitter_ms);
+                            snap.rtp_sent_packets = Some(agg.sent_packets);
+                            snap.rtp_recv_packets = Some(agg.recv_packets);
                         }
                     }
                     snap.finished = finished.load(std::sync::atomic::Ordering::Relaxed);
@@ -782,26 +768,14 @@ impl Engine {
             snap.calls_failed, snap.calls_timeout, snap.asr, elapsed,
         ));
 
-        // 聚合 RTP 統計
-        let rtp_agg: Option<(f64, f64, f64, u64, u64, u64)> = if cfg.enable_rtp {
+        let rtp_agg = if cfg.enable_rtp {
             {
                 let mut sessions = rtp_sessions.lock().await;
                 let mut snaps    = rtp_snapshots.lock().await;
                 for (_, s) in sessions.drain() { snaps.push(s.stop()); }
             }
             let snaps = rtp_snapshots.lock().await;
-            if snaps.is_empty() {
-                None
-            } else {
-                let n          = snaps.len() as f64;
-                let avg_mos    = snaps.iter().map(|s| s.mos).sum::<f64>()           / n;
-                let avg_loss   = snaps.iter().map(|s| s.loss_rate_pct).sum::<f64>() / n;
-                let avg_jitter = snaps.iter().map(|s| s.jitter_ms).sum::<f64>()     / n;
-                let total_sent = snaps.iter().map(|s| s.sent_packets).sum::<u64>();
-                let total_recv = snaps.iter().map(|s| s.recv_packets).sum::<u64>();
-                let total_ooo  = snaps.iter().map(|s| s.out_of_order).sum::<u64>();
-                Some((avg_mos, avg_loss, avg_jitter, total_sent, total_recv, total_ooo))
-            }
+            aggregate_snapshots(&snaps)
         } else {
             None
         };
@@ -853,12 +827,12 @@ impl Engine {
             fail_5xx: detail.fail_5xx.load(std::sync::atomic::Ordering::Relaxed),
             fail_6xx: detail.fail_6xx.load(std::sync::atomic::Ordering::Relaxed),
             fail_codes,
-            mos:              rtp_agg.map(|a| a.0),
-            loss_rate_pct:    rtp_agg.map(|a| a.1),
-            jitter_ms:        rtp_agg.map(|a| a.2),
-            rtp_sent:         rtp_agg.map(|a| a.3),
-            rtp_recv:         rtp_agg.map(|a| a.4),
-            rtp_out_of_order: rtp_agg.map(|a| a.5),
+            mos:              rtp_agg.as_ref().map(|a| a.mos),
+            loss_rate_pct:    rtp_agg.as_ref().map(|a| a.loss_rate_pct),
+            jitter_ms:        rtp_agg.as_ref().map(|a| a.jitter_ms),
+            rtp_sent:         rtp_agg.as_ref().map(|a| a.sent_packets),
+            rtp_recv:         rtp_agg.as_ref().map(|a| a.recv_packets),
+            rtp_out_of_order: rtp_agg.as_ref().map(|a| a.out_of_order),
         })
     }
 }
